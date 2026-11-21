@@ -5,7 +5,7 @@
 use crate::caps::Capabilities;
 use crate::deps::{self, Tools};
 use crate::encode::{self, Event, Handle, Job, Outcome, Progress};
-use crate::model::{Container, EncodeSettings};
+use crate::model::{Container, EncodeSettings, VideoCodec};
 use crate::probe::{self, SourceInfo};
 use crate::settings::{self, DestMode, Resolution, Settings, WindowGeom};
 use eframe::egui;
@@ -188,14 +188,18 @@ impl App {
         let custom = self.set.ffmpeg_dir.clone();
         std::thread::spawn(move || {
             let found = if force { None } else { deps::locate(custom.as_deref()) };
+            // The copy an earlier Stiva downloaded was the "essentials" build, which has no SVT-AV1: replace it.
+            let stale = cfg!(windows) && custom.is_none() && found.as_ref().is_some_and(deps::is_essentials);
             let result = match found {
-                Some(t) => Ok(t),
-                None => {
+                Some(t) if !stale => Ok(t),
+                old => {
                     let _ = tx.send(Msg::Setup("Starting...".into(), None));
-                    deps::download(&mut |m, f| {
+                    let fetched = deps::download(&mut |m, f| {
                         let _ = tx.send(Msg::Setup(m.to_string(), f));
                         ctx.request_repaint();
-                    })
+                    });
+                    // Offline with an older copy at hand: use it, and try again at the next start.
+                    fetched.or_else(|e| old.ok_or(e))
                 }
             };
             let _ = tx.send(Msg::Tools(result));
@@ -227,7 +231,20 @@ impl App {
                     }
                 }
                 Msg::Tools(Err(e)) => self.setup = Setup::Failed(e),
-                Msg::Caps(Ok(c)) => self.caps = Some(c),
+                Msg::Caps(Ok(c)) => {
+                    // A saved choice this ffmpeg or this PC cannot do (a graphics chip that is gone, say) gives way.
+                    let enc = &mut self.set.encode;
+                    if !enc.container.audio_only() && !c.has(enc.video_codec.encoder()) {
+                        enc.set_video_codec(VideoCodec::X264);
+                        enc.normalize();
+                        self.dirty = true;
+                    }
+                    // Which graphics-chip encoders passed their test, and why the others did not.
+                    let logs = deps::data_dir().join("logs");
+                    let _ = std::fs::create_dir_all(&logs);
+                    let _ = std::fs::write(logs.join("hardware.txt"), c.hardware_report());
+                    self.caps = Some(c);
+                }
                 Msg::Caps(Err(_)) => {}
                 Msg::Picked(p) => self.load_source(p),
                 Msg::PickedFolder(p) => {

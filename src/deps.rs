@@ -3,7 +3,6 @@
 //! checks its SHA-256 and keeps it under the user's data folder. A folder chosen by the user wins.
 
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
 use std::io::Cursor;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,9 +15,10 @@ pub struct Tools {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-const FF_ZIP: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+/// The "full" build, not "essentials": only the full one has SVT-AV1. It comes as .7z only.
+const FF_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z";
 #[cfg_attr(not(windows), allow(dead_code))]
-const FF_ZIP_NAME: &str = "ffmpeg-release-essentials.zip";
+const FF_NAME: &str = "ffmpeg-release-full.7z";
 
 #[cfg(windows)]
 const EXE: &str = ".exe";
@@ -133,34 +133,49 @@ fn write_atomic(path: &Path, fill: impl FnOnce(&mut std::fs::File) -> std::io::R
     Ok(())
 }
 
+/// Takes `ffmpeg.exe` and `ffprobe.exe` out of a gyan.dev archive, whatever the version folder is called.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unpack(archive: Vec<u8>, bin: &Path) -> Result<(), String> {
+    use sevenz_rust2::{ArchiveReader, Error, Password};
+    let mut ar = ArchiveReader::new(Cursor::new(archive), Password::empty()).map_err(|e| e.to_string())?;
+    ar.for_each_entries(|entry, reader| {
+        for tool in ["ffmpeg.exe", "ffprobe.exe"] {
+            if entry.name().ends_with(&format!("/bin/{tool}")) {
+                write_atomic(&bin.join(tool), |out| std::io::copy(reader, out).map(|_| ())).map_err(|e| Error::Other(e.into()))?;
+                break;
+            }
+        }
+        Ok(true)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// True for the old "essentials" build, which has no SVT-AV1. Earlier versions of Stiva downloaded that one,
+/// so a copy found in the app's folder is replaced by the full build.
+pub fn is_essentials(tools: &Tools) -> bool {
+    let mut cmd = std::process::Command::new(&tools.ffmpeg);
+    cmd.arg("-version");
+    quiet(&mut cmd);
+    cmd.output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().next().is_some_and(|l| l.contains("essentials_build")))
+}
+
 /// Downloads ffmpeg and ffprobe into the app's folder, replacing any older copy.
 /// `status` gets a message and the fraction done, when known.
 #[cfg(windows)]
 pub fn download(status: &mut dyn FnMut(&str, Option<f32>)) -> Result<Tools, String> {
     let bin = bin_dir();
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
-    status("Downloading ffmpeg (about 30 MB)...", Some(0.0));
-    let zip = fetch(FF_ZIP, &mut |f| status("Downloading ffmpeg (about 30 MB)...", f))?;
+    let msg = "Downloading ffmpeg (about 75 MB)...";
+    status(msg, Some(0.0));
+    let archive = fetch(FF_URL, &mut |f| status(msg, f))?;
     status("Checking the download...", None);
-    let sums = String::from_utf8_lossy(&fetch(&format!("{FF_ZIP}.sha256"), &mut |_| {})?).into_owned();
-    let want = expected_hash(&sums, FF_ZIP_NAME).ok_or("checksum not found")?;
-    if sha256_hex(&zip) != want {
+    let sums = String::from_utf8_lossy(&fetch(&format!("{FF_URL}.sha256"), &mut |_| {})?).into_owned();
+    let want = expected_hash(&sums, FF_NAME).ok_or("checksum not found")?;
+    if sha256_hex(&archive) != want {
         return Err("The download does not match its checksum, so it was discarded. Try again.".into());
     }
-    status("Unpacking...", None);
-    let mut ar = zip::ZipArchive::new(Cursor::new(zip)).map_err(|e| e.to_string())?;
-    for i in 0..ar.len() {
-        let mut f = ar.by_index(i).map_err(|e| e.to_string())?;
-        let Some(name) = f.name().map(|n| n.to_string()).ok() else {
-            continue;
-        };
-        for tool in ["ffmpeg.exe", "ffprobe.exe"] {
-            if name.ends_with(&format!("/bin/{tool}")) {
-                write_atomic(&bin.join(tool), |out| std::io::copy(&mut f, out).map(|_| ()))?;
-                break;
-            }
-        }
-    }
+    status("Unpacking (this takes a few seconds)...", None);
+    unpack(archive, &bin)?;
     in_dir(&bin).ok_or_else(|| "ffmpeg.exe or ffprobe.exe was not in the archive".to_string())
 }
 
@@ -175,6 +190,25 @@ pub fn download(_status: &mut dyn FnMut(&str, Option<f32>)) -> Result<Tools, Str
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Runs only when STIVA_TEST_7Z names a real gyan.dev archive (about 75 MB), so it stays out of ordinary runs.
+    #[test]
+    fn the_real_gyan_archive_gives_both_programs() {
+        let Some(file) = std::env::var_os("STIVA_TEST_7Z") else { return };
+        let dir = std::env::temp_dir().join(format!("stiva-7z-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unpack(std::fs::read(file).unwrap(), &dir).unwrap();
+        for tool in ["ffmpeg.exe", "ffprobe.exe"] {
+            let data = std::fs::read(dir.join(tool)).unwrap();
+            assert!(data.len() > 10_000_000, "{tool} is too small: {}", data.len());
+            assert_eq!(&data[..2], b"MZ", "{tool} is not a Windows program");
+        }
+        let ffmpeg = std::fs::read(dir.join("ffmpeg.exe")).unwrap();
+        let has = |name: &[u8]| ffmpeg.windows(name.len()).any(|w| w == name);
+        assert!(has(b"libsvtav1") && has(b"libx265") && has(b"h264_amf"), "the build lacks an encoder Stiva offers");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "only the two programs are written");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sha256_known_vector() {

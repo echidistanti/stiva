@@ -296,6 +296,9 @@ impl App {
                             egui::ComboBox::from_id_salt("vcodec").selected_text(enc.video_codec.label()).width(190.0).show_ui(ui, |ui| {
                                 for c in enc.container.video_codecs() {
                                     let ok = has(c.encoder());
+                                    if c.is_hardware() && !ok {
+                                        continue; // no such chip here: not worth a greyed-out line
+                                    }
                                     let text = if ok { c.label().to_string() } else { format!("{} ({})", c.label(), s::NOT_IN_FFMPEG) };
                                     ui.add_enabled_ui(ok, |ui| ui.selectable_value(&mut pick, *c, text));
                                 }
@@ -305,7 +308,7 @@ impl App {
                         setting_row(ui, s::VIDEO_QUALITY, |ui| {
                             let (lo, hi) = enc.video_codec.crf_range();
                             ui.add(egui::Slider::new(&mut enc.crf, lo..=hi));
-                            ui.label(muted(s::VIDEO_QUALITY_HINT));
+                            ui.label(muted(if enc.video_codec.is_hardware() { s::VIDEO_QUALITY_HINT_HW } else { s::VIDEO_QUALITY_HINT }));
                         });
                         setting_row(ui, s::VIDEO_SPEED, |ui| {
                             egui::ComboBox::from_id_salt("preset").selected_text(enc.preset.clone()).width(190.0).show_ui(ui, |ui| {
@@ -315,6 +318,10 @@ impl App {
                             });
                             ui.label(muted(s::VIDEO_SPEED_HINT));
                         });
+                        if enc.video_codec.is_hardware() {
+                            ui.add_space(4.0);
+                            ui.label(muted(s::HARDWARE_NOTE));
+                        }
                     }
                 }
                 Tab::Audio => {

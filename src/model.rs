@@ -60,9 +60,12 @@ impl Container {
     }
 
     pub fn video_codecs(self) -> &'static [VideoCodec] {
+        use VideoCodec::*;
         match self {
-            Container::Mp4 | Container::Mkv => &[VideoCodec::X264, VideoCodec::X265, VideoCodec::SvtAv1, VideoCodec::Vp9],
-            Container::WebM => &[VideoCodec::Vp9, VideoCodec::SvtAv1],
+            Container::Mp4 | Container::Mkv => {
+                &[X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv]
+            }
+            Container::WebM => &[Vp9, SvtAv1, Av1Amf, Av1Nvenc, Av1Qsv],
             _ => &[],
         }
     }
@@ -87,15 +90,39 @@ pub enum VideoCodec {
     X265,
     SvtAv1,
     Vp9,
+    // On the graphics chip. Shown only when a test encode on this PC works.
+    H264Amf,
+    HevcAmf,
+    Av1Amf,
+    H264Nvenc,
+    HevcNvenc,
+    Av1Nvenc,
+    H264Qsv,
+    HevcQsv,
+    Av1Qsv,
 }
 
 impl VideoCodec {
+    pub const ALL: [VideoCodec; 13] = {
+        use VideoCodec::*;
+        [X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv]
+    };
+
     pub fn label(self) -> &'static str {
         match self {
             VideoCodec::X264 => "H.264 (x264)",
             VideoCodec::X265 => "H.265 (x265)",
             VideoCodec::SvtAv1 => "AV1 (SVT-AV1)",
             VideoCodec::Vp9 => "VP9",
+            VideoCodec::H264Amf => "H.264 (AMD AMF)",
+            VideoCodec::HevcAmf => "H.265 (AMD AMF)",
+            VideoCodec::Av1Amf => "AV1 (AMD AMF)",
+            VideoCodec::H264Nvenc => "H.264 (NVIDIA NVENC)",
+            VideoCodec::HevcNvenc => "H.265 (NVIDIA NVENC)",
+            VideoCodec::Av1Nvenc => "AV1 (NVIDIA NVENC)",
+            VideoCodec::H264Qsv => "H.264 (Intel QSV)",
+            VideoCodec::HevcQsv => "H.265 (Intel QSV)",
+            VideoCodec::Av1Qsv => "AV1 (Intel QSV)",
         }
     }
 
@@ -106,43 +133,97 @@ impl VideoCodec {
             VideoCodec::X265 => "libx265",
             VideoCodec::SvtAv1 => "libsvtav1",
             VideoCodec::Vp9 => "libvpx-vp9",
+            VideoCodec::H264Amf => "h264_amf",
+            VideoCodec::HevcAmf => "hevc_amf",
+            VideoCodec::Av1Amf => "av1_amf",
+            VideoCodec::H264Nvenc => "h264_nvenc",
+            VideoCodec::HevcNvenc => "hevc_nvenc",
+            VideoCodec::Av1Nvenc => "av1_nvenc",
+            VideoCodec::H264Qsv => "h264_qsv",
+            VideoCodec::HevcQsv => "hevc_qsv",
+            VideoCodec::Av1Qsv => "av1_qsv",
         }
     }
 
-    /// Lowest and highest value of the constant quality scale: lower is better and bigger.
+    pub fn is_hardware(self) -> bool {
+        !matches!(self, VideoCodec::X264 | VideoCodec::X265 | VideoCodec::SvtAv1 | VideoCodec::Vp9)
+    }
+
+    pub fn is_hevc(self) -> bool {
+        matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv)
+    }
+
+    /// Lowest and highest value of the quality scale: lower is better and bigger.
     pub fn crf_range(self) -> (u32, u32) {
+        use VideoCodec::*;
         match self {
-            VideoCodec::X264 | VideoCodec::X265 => (0, 51),
-            VideoCodec::SvtAv1 | VideoCodec::Vp9 => (0, 63),
+            X264 | X265 | H264Amf | HevcAmf | H264Nvenc | HevcNvenc | Av1Nvenc => (0, 51),
+            SvtAv1 | Vp9 => (0, 63),
+            Av1Amf => (0, 255),
+            H264Qsv | HevcQsv | Av1Qsv => (1, 51),
         }
     }
 
     pub fn default_crf(self) -> u32 {
+        use VideoCodec::*;
         match self {
-            VideoCodec::X264 => 22,
-            VideoCodec::X265 => 24,
-            VideoCodec::SvtAv1 => 30,
-            VideoCodec::Vp9 => 32,
+            X264 => 22,
+            X265 => 24,
+            SvtAv1 => 30,
+            Vp9 => 32,
+            H264Amf | HevcAmf => 24,
+            Av1Amf => 110,
+            H264Nvenc | HevcNvenc => 26,
+            Av1Nvenc => 28,
+            H264Qsv | HevcQsv | Av1Qsv => 24,
         }
     }
 
     /// Speed settings from the slowest (best compression) to the fastest.
     pub fn presets(self) -> &'static [&'static str] {
+        use VideoCodec::*;
         match self {
-            VideoCodec::X264 | VideoCodec::X265 => {
-                &["veryslow", "slower", "slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast"]
-            }
-            VideoCodec::SvtAv1 => &["2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
-            VideoCodec::Vp9 => &["0", "1", "2", "3", "4", "5"],
+            X264 | X265 => &["veryslow", "slower", "slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast"],
+            SvtAv1 => &["2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
+            Vp9 => &["0", "1", "2", "3", "4", "5"],
+            H264Amf | HevcAmf | Av1Amf => &["quality", "balanced", "speed"],
+            H264Nvenc | HevcNvenc | Av1Nvenc => &["p7", "p6", "p5", "p4", "p3", "p2", "p1"],
+            H264Qsv | HevcQsv | Av1Qsv => &["veryslow", "slower", "slow", "medium", "fast", "faster", "veryfast"],
         }
     }
 
     pub fn default_preset(self) -> &'static str {
+        use VideoCodec::*;
         match self {
-            VideoCodec::X264 | VideoCodec::X265 => "medium",
-            VideoCodec::SvtAv1 => "6",
-            VideoCodec::Vp9 => "2",
+            X264 | X265 => "medium",
+            SvtAv1 => "6",
+            Vp9 => "2",
+            H264Amf | HevcAmf | Av1Amf => "balanced",
+            H264Nvenc | HevcNvenc | Av1Nvenc => "p5",
+            H264Qsv | HevcQsv | Av1Qsv => "medium",
         }
+    }
+
+    /// The ffmpeg options for this codec at a given quality and speed. The test encode that decides whether a
+    /// hardware encoder is offered uses these same options, so what passes the test is what the real encode runs.
+    pub fn args(self, crf: u32, preset: &str) -> Vec<String> {
+        use VideoCodec::*;
+        let crf = crf.to_string();
+        let mut a: Vec<&str> = vec!["-c:v", self.encoder()];
+        match self {
+            X264 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
+            X265 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p", "-x265-params", "log-level=error"]),
+            SvtAv1 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
+            Vp9 => a.extend(["-crf", &crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset, "-pix_fmt", "yuv420p"]),
+            // Constant quantizer; the other rate modes come with the bitrate options.
+            H264Amf | HevcAmf | Av1Amf => a.extend(["-quality", preset, "-rc", "cqp", "-qp_i", &crf, "-qp_p", &crf, "-pix_fmt", "nv12"]),
+            // Variable bitrate steered by a quality level, with no bitrate cap.
+            H264Nvenc | HevcNvenc | Av1Nvenc => {
+                a.extend(["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &crf, "-b:v", "0", "-pix_fmt", "nv12"])
+            }
+            H264Qsv | HevcQsv | Av1Qsv => a.extend(["-preset", preset, "-global_quality", &crf, "-pix_fmt", "nv12"]),
+        }
+        a.into_iter().map(String::from).collect()
     }
 }
 
@@ -345,6 +426,38 @@ mod tests {
         assert_eq!(s.crf, 51);
         s.set_video_codec(VideoCodec::SvtAv1);
         assert_eq!((s.crf, s.preset.as_str()), (30, "6"));
+    }
+
+    #[test]
+    fn every_codec_keeps_its_defaults_inside_its_own_scales() {
+        for c in VideoCodec::ALL {
+            let (lo, hi) = c.crf_range();
+            assert!((lo..=hi).contains(&c.default_crf()), "{c:?} quality");
+            assert!(c.presets().contains(&c.default_preset()), "{c:?} speed");
+            let args = c.args(c.default_crf(), c.default_preset());
+            assert_eq!(&args[..2], ["-c:v", c.encoder()], "{c:?}");
+        }
+    }
+
+    #[test]
+    fn hardware_is_named_as_such_and_av1_alone_fits_webm() {
+        assert!(!VideoCodec::X264.is_hardware() && VideoCodec::HevcAmf.is_hardware());
+        assert!(VideoCodec::HevcQsv.is_hevc() && !VideoCodec::Av1Qsv.is_hevc());
+        let webm: Vec<_> = Container::WebM.video_codecs().iter().filter(|c| c.is_hardware()).collect();
+        assert_eq!(webm, [&VideoCodec::Av1Amf, &VideoCodec::Av1Nvenc, &VideoCodec::Av1Qsv]);
+    }
+
+    #[test]
+    fn av1_on_the_graphics_chip_survives_a_switch_to_webm() {
+        let mut s = EncodeSettings::default();
+        s.set_video_codec(VideoCodec::Av1Amf);
+        assert_eq!((s.crf, s.preset.as_str()), (110, "balanced"));
+        s.container = Container::WebM;
+        s.normalize(); // the audio changes to Opus, the video codec stays
+        assert_eq!((s.video_codec, s.crf), (VideoCodec::Av1Amf, 110));
+        s.set_video_codec(VideoCodec::HevcNvenc);
+        s.normalize();
+        assert_eq!(s.video_codec, VideoCodec::Vp9, "H.265 does not fit WebM");
     }
 
     #[test]

@@ -45,6 +45,9 @@ pub const FORMAT_NOTE_WEBM: &str = "For the web: VP9 or AV1 video with Opus or V
 pub const FORMAT_NOTE_AUDIO: &str = "Only the sound is kept.";
 pub const VIDEO_CODEC: &str = "Codec";
 pub const VIDEO_QUALITY: &str = "Quality (CRF)";
+pub const VIDEO_QUALITY_HINT_HW: &str = "Lower is better and bigger. The scale is the chip's own, not the same as x264.";
+pub const HARDWARE_NOTE: &str =
+    "Runs on the graphics chip: much faster, but the file comes out bigger than with x264 or x265 at the same look.";
 pub const VIDEO_QUALITY_HINT: &str = "Lower is better and bigger. Around 18 looks like the source, 28 is small.";
 pub const VIDEO_SPEED: &str = "Speed";
 pub const VIDEO_SPEED_HINT: &str = "Slower takes longer and makes a smaller file at the same quality.";

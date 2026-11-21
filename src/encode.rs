@@ -1,7 +1,7 @@
 //! Turns the user's choices into an ffmpeg command line, runs it, and reports progress.
 //! ffmpeg writes to `name.ext.part`; the file takes its real name only when the run ends well.
 
-use crate::model::{AudioCodec, Container, EncodeSettings, VideoCodec};
+use crate::model::{AudioCodec, Container, EncodeSettings};
 use crate::probe::SourceInfo;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
@@ -110,21 +110,12 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
 
     if video {
         let codec = st.video_codec;
-        let (crf, preset) = (st.crf.to_string(), st.preset.as_str());
-        match codec {
-            VideoCodec::X264 => o(&["-c:v", "libx264", "-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
-            VideoCodec::X265 => {
-                o(&["-c:v", "libx265", "-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p", "-x265-params", "log-level=error"]);
-                if st.container == Container::Mp4 {
-                    // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
-                    o(&["-tag:v", "hvc1"]);
-                }
-            }
-            VideoCodec::SvtAv1 => o(&["-c:v", "libsvtav1", "-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
-            VideoCodec::Vp9 => {
-                o(&["-c:v", "libvpx-vp9", "-crf", &crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset, "-pix_fmt", "yuv420p"])
-            }
+        let mut args = codec.args(st.crf, &st.preset);
+        if codec.is_hevc() && st.container == Container::Mp4 {
+            // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
+            args.extend(["-tag:v".to_string(), "hvc1".to_string()]);
         }
+        o(&args.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
     match st.audio_codec {
@@ -364,7 +355,7 @@ pub fn start(job: Job, ffmpeg: PathBuf, emit: impl Fn(Event) + Send + Sync + 'st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Mixdown;
+    use crate::model::{Mixdown, VideoCodec};
     use crate::probe::{AudioTrack, VideoInfo};
 
     fn source() -> SourceInfo {
