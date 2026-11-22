@@ -20,7 +20,7 @@
 
 The layout follows [VidCoder](https://github.com/RandomEngy/VidCoder): the file on the left, the settings on the right, the queue one button away. The colours and the manners follow [Camallo](https://github.com/echidistanti/camallo), a downloader by the same author. Stiva is not affiliated with either.
 
-> **Status: version 0.1, one person's project.** It works on the author's computer, and the list of what has and has not been tried on real hardware is [further down](#what-has-been-tested). Read it before trusting Stiva with the only copy of something.
+> **Status: version 0.1, one person's project.** It works on the author's computer, and the list of what has and has not been tried on real hardware is [further down](#what-has-been-tested). Hardware encoders other than AMD's are the open question.
 
 ## Contents
 
@@ -87,8 +87,6 @@ The screenshots are renderings from Linux, where the author builds the program, 
 Linux builds and runs for development, using the ffmpeg installed on the system. It is not a supported platform. There is no macOS version.
 
 ## Install
-
-> The first release is not published yet. Until it is, [build from source](#building-from-source).
 
 **Installer (recommended).** Download `stiva-<version>-windows-x64-setup.exe` from the [Releases](https://github.com/echidistanti/stiva/releases) page and run it. It installs for your user only, so it never asks for administrator rights. It adds a Start menu entry and, if you tick the box, a desktop shortcut. Uninstalling asks whether to remove Stiva's own data as well (settings, presets, the downloaded ffmpeg, logs). It never touches your videos.
 
@@ -197,19 +195,17 @@ An honest list, so nobody finds out at the worst moment.
 - first start and the ffmpeg download;
 - opening files, presets, saving presets, the queue, pause and stop;
 - 8-bit and 10-bit with x264, x265, SVT-AV1 and VP9;
+- filters, bitrate, target size, two passes, subtitles;
+- the notification and the progress on the taskbar button;
+- all the *When done* choices: open the folder, close Stiva, sleep, shut down;
+- the installer: building it, installing, uninstalling;
 - the **AMD AMF** hardware encoders.
 
 **Not tried on real hardware:** NVIDIA NVENC, Intel QSV, and hardware AV1 of any brand. They are driven the same way as AMF, and Stiva offers them only when ffmpeg can open them, but nobody has looked at a file they made.
 
-**Checked by automated tests and by running on Linux, not yet tried on Windows:**
+The tests (`cargo test`, about 90) include real encodes with ffmpeg: they check that the command lines Stiva writes produce files with the right streams, size and length. They run on Linux, so they cannot say what a Windows machine does with a notification or a power command; that part is what the list above is for.
 
-- filters, bitrate and target size, two passes, subtitles, chapters;
-- the Windows notification, the taskbar progress, sleep and shut down;
-- the installer.
-
-The tests (`cargo test`, about 90) include real encodes with ffmpeg: they check that the command lines Stiva writes produce files with the right streams, size and length. They cannot check what a Windows machine does with a notification or a power command.
-
-If something in the second or third list fails for you, please open an issue with the log (see [Contributing](#contributing)).
+If something fails for you, please open an issue with the log (see [Contributing](#contributing)).
 
 ## Troubleshooting
 
