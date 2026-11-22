@@ -1,0 +1,50 @@
+name: Release
+
+# Publishing a release builds everything on GitHub: stiva.exe for Windows from the tag, the portable
+# stiva-<version>-windows-x64.7z attached to the release, and then the setup (see installer.yml).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install the cross compiler and 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 p7zip-full
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Build stiva.exe
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+
+      - name: Pack it and attach it to the release
+        run: |
+          version="${TAG#v}"
+          mkdir dist
+          cp target/x86_64-pc-windows-gnu/release/stiva.exe dist/
+          (cd dist && 7z a "../stiva-${version}-windows-x64.7z" stiva.exe)
+          gh release upload "$TAG" "stiva-${version}-windows-x64.7z" --repo "$GITHUB_REPOSITORY" --clobber
+
+  installer:
+    needs: build
+    uses: ./.github/workflows/installer.yml
+    with:
+      tag: ${{ github.event.release.tag_name || inputs.tag }}

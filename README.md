@@ -268,7 +268,13 @@ In debug builds a few environment variables help to try things without clicking:
 
 ## Releases and the installer
 
-A release has the portable `stiva-<version>-windows-x64.7z` attached. Publishing the release starts the **Installer** workflow (`.github/workflows/installer.yml`): it downloads that archive, builds the setup with [Inno Setup](https://jrsoftware.org/isinfo.php) from `installer/stiva.iss`, and attaches `stiva-<version>-windows-x64-setup.exe` to the same release. It can also be started by hand with the tag name.
+GitHub builds the release. Publishing a release (on the Releases page, with a new tag such as `v0.1.0` on `main`) starts the **Release** workflow (`.github/workflows/release.yml`):
+
+1. it builds `stiva.exe` for Windows from that tag (cross-compiled with mingw-w64, the same command as in [Building from source](#building-from-source)),
+2. packs it as `stiva-<version>-windows-x64.7z` and attaches it to the release,
+3. then calls the **Installer** workflow (`.github/workflows/installer.yml`), which builds the setup with [Inno Setup](https://jrsoftware.org/isinfo.php) from `installer/stiva.iss` and attaches `stiva-<version>-windows-x64-setup.exe` to the same release.
+
+Either workflow can also be started by hand from the *Actions* tab with the tag name, to rebuild the files of an existing release.
 
 The installer works per user (`%LOCALAPPDATA%\Programs\Stiva`), gives the shortcuts the same application identity as the program so notifications show Stiva's name, and on uninstall asks before removing the program's data.
 
@@ -292,7 +298,7 @@ The installer works per user (`%LOCALAPPDATA%\Programs\Stiva`), gives the shortc
 | `src/settings.rs` | the settings file |
 | `src/strings.rs` | every text the user can read |
 | `installer/stiva.iss` | the Inno Setup script |
-| `.github/workflows/` | the installer workflow |
+| `.github/workflows/` | the release and installer workflows |
 | `assets/` | the icon in the sizes the program and the installer need |
 | `docs/` | the screenshots in this README |
 
