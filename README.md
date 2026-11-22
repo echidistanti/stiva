@@ -94,7 +94,7 @@ Linux builds and runs for development, using the ffmpeg installed on the system.
 
 **First start.** Stiva downloads ffmpeg from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), checks its SHA-256 against the one published next to it, and unpacks `ffmpeg.exe` and `ffprobe.exe`. If you already have ffmpeg, choose *Options → ffmpeg → From the folder you chose* and point Stiva at the folder.
 
-**SmartScreen.** Stiva is not code signed, so Windows may warn the first time: *More info → Run anyway*. The source is here, and you can build the exe yourself.
+**SmartScreen and Defender.** Stiva is not code signed, so Windows may warn the first time: *More info → Run anyway*. A new unsigned program can also be taken for something worse by an antivirus; see [Troubleshooting](#troubleshooting) for what to do. The source is here, and you can build the exe yourself.
 
 ## Quick start
 
@@ -223,7 +223,7 @@ If something fails for you, please open an issue with the log (see [Contributing
 
 **The computer did not sleep.** Stiva asks politely and does not force it; a program that objects wins.
 
-**Windows SmartScreen blocks the exe.** See [Install](#install).
+**Windows SmartScreen or Defender blocks the exe, or removes it.** Stiva is a new program, not code signed, and it does things that antivirus heuristics look at: it downloads an archive, unpacks an exe from it, writes to its own registry key, and can put the computer to sleep. That can end in a false alarm. SmartScreen: *More info → Run anyway*. Defender: *Windows Security → Virus & threat protection → Protection history*, restore the file and choose *Allow on device*. Then tell Microsoft it is a false positive at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission) (*Software developer*), which is what makes the alarm stop for everybody. Nothing here is a reason to distrust the source: it is in this repository, and `cargo build --release` makes the same exe. If you would rather not take anyone's word, build it yourself.
 
 ## FAQ
 
@@ -245,7 +245,7 @@ Stiva runs `ffprobe` on the file to learn its streams, builds one ffmpeg command
 
 Before offering an encoder, `caps.rs` asks `ffmpeg -encoders` what exists and then encodes a few black frames with each candidate, in 8-bit and 10-bit, to see which really start on this computer.
 
-The notification is a short PowerShell script started with `-EncodedCommand`; the texts reach it through environment variables, so no file name is ever pasted into a script. The taskbar progress is the Windows `ITaskbarList3` interface.
+The notification and the taskbar progress use the Windows APIs directly (`Windows.UI.Notifications` and `ITaskbarList3`), from `platform.rs`. Stiva starts no PowerShell and no other helper program; the one program it ever starts besides ffmpeg is `shutdown.exe`, and only for *Shut down*. The texts of a notification are escaped before they go into its XML.
 
 The program is written in Rust with [egui](https://github.com/emilk/egui). The interface is immediate mode: every frame it draws from the state in `app.rs`, and what the user did comes back as a list of actions applied afterwards.
 
@@ -257,12 +257,12 @@ You need Rust 1.85 or newer (edition 2024).
 cargo run                                              # a debug build, on Windows or Linux
 cargo fmt                                              # the project style, see rustfmt.toml
 STIVA_FFDIR=/usr/bin cargo test                        # the tests; the folder must hold ffmpeg and ffprobe
-cargo build --release --target x86_64-pc-windows-gnu   # a Windows exe from Linux (needs mingw-w64)
+cargo build --release --target x86_64-pc-windows-gnu   # a Windows exe from Linux (needs mingw-w64), for trying things
 ```
 
 Without `STIVA_FFDIR` and without ffmpeg on the path, the tests that make real encodes print a line and skip themselves. One more test checks the real gyan.dev archive; it runs only when `STIVA_TEST_7Z` names a downloaded one (about 75 MB).
 
-On Windows with the MSVC toolchain, `cargo build --release` is enough. The icon and the version information are added by `build.rs`.
+On Windows with the MSVC toolchain, `cargo build --release` is enough. This is how the releases are built; `.cargo/config.toml` links the C runtime into the exe so it starts on a PC without the Visual C++ Redistributable. The icon and the version information are added by `build.rs`.
 
 In debug builds a few environment variables help to try things without clicking: `STIVA_AUTOENCODE`, `STIVA_SHOW_OPTIONS`, `STIVA_TAB`, `STIVA_WHENDONE` and `STIVA_FFDIR`. The first four do nothing in release builds.
 
@@ -270,7 +270,7 @@ In debug builds a few environment variables help to try things without clicking:
 
 GitHub builds the release. Publishing a release (on the Releases page, with a new tag such as `v0.1.0` on `main`) starts the **Release** workflow (`.github/workflows/release.yml`):
 
-1. it builds `stiva.exe` for Windows from that tag (cross-compiled with mingw-w64, the same command as in [Building from source](#building-from-source)),
+1. it builds `stiva.exe` for Windows from that tag on a Windows runner (MSVC, `cargo build --release --locked`),
 2. packs it as `stiva-<version>-windows-x64.7z` and attaches it to the release,
 3. then calls the **Installer** workflow (`.github/workflows/installer.yml`), which builds the setup with [Inno Setup](https://jrsoftware.org/isinfo.php) from `installer/stiva.iss` and attaches `stiva-<version>-windows-x64-setup.exe` to the same release.
 
@@ -298,7 +298,7 @@ The installer works per user (`%LOCALAPPDATA%\Programs\Stiva`), gives the shortc
 | `src/settings.rs` | the settings file |
 | `src/strings.rs` | every text the user can read |
 | `installer/stiva.iss` | the Inno Setup script |
-| `.github/workflows/` | the release and installer workflows |
+| `.github/workflows/` | CI (build and format check on every push), release, installer |
 | `assets/` | the icon in the sizes the program and the installer need |
 | `docs/` | the screenshots in this README |
 

@@ -1,6 +1,6 @@
 name: Release
 
-# Publishing a release builds everything on GitHub: stiva.exe for Windows from the tag, the portable
+# Publishing a release builds everything on GitHub: stiva.exe for Windows (MSVC) from the tag, the portable
 # stiva-<version>-windows-x64.7z attached to the release, and then the setup (see installer.yml).
 on:
   release:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -25,23 +25,22 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-      - name: Install the cross compiler and 7-Zip
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64 p7zip-full
-
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
 
       - name: Build stiva.exe
-        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+        run: cargo build --release --locked
 
       - name: Pack it and attach it to the release
+        shell: pwsh
         run: |
-          version="${TAG#v}"
-          mkdir dist
-          cp target/x86_64-pc-windows-gnu/release/stiva.exe dist/
-          (cd dist && 7z a "../stiva-${version}-windows-x64.7z" stiva.exe)
-          gh release upload "$TAG" "stiva-${version}-windows-x64.7z" --repo "$GITHUB_REPOSITORY" --clobber
+          $version = $env:TAG.TrimStart('v')
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\stiva.exe dist\
+          Push-Location dist
+          7z a "..\stiva-$version-windows-x64.7z" stiva.exe
+          if ($LASTEXITCODE -ne 0) { throw "7z failed" }
+          Pop-Location
+          gh release upload $env:TAG "stiva-$version-windows-x64.7z" --repo $env:GITHUB_REPOSITORY --clobber
 
   installer:
     needs: build

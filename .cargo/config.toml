@@ -1,0 +1,4 @@
+# The MSVC build carries its C runtime inside the exe, so it starts on a PC without the
+# "Visual C++ Redistributable" (a fresh Windows 11 often lacks it).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

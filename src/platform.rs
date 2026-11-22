@@ -75,68 +75,85 @@ pub fn focused(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().focused.unwrap_or(true))
 }
 
-/// Standard base64, which PowerShell's -EncodedCommand asks for (of the script in UTF-16LE).
+/// The id Windows files Stiva's notifications under. The installer gives the shortcuts the same one.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn base64(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
-        out.push(A[(n >> 18) as usize & 63] as char);
-        out.push(A[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
+const APP_ID: &str = "Stiva";
 
-/// The script behind the notification. The texts come in through the environment (STIVA_TITLE, STIVA_BODY,
-/// STIVA_ICON), never pasted into the script, so nothing in a file name can be taken for code.
-/// Unpackaged programs have no identity for Windows to attach a notification to, so the script first
-/// registers one for the current user (HKCU only): a name and an icon under the id "Stiva".
+/// The notification as Windows wants it: XML with two lines of text. The texts are escaped, so a file name
+/// with a `<` or an `&` in it stays text.
 #[cfg_attr(not(windows), allow(dead_code))]
-const TOAST_SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-$key = 'HKCU:\Software\Classes\AppUserModelId\Stiva'
-if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
-Set-ItemProperty -Path $key -Name DisplayName -Value 'Stiva'
-if ($env:STIVA_ICON -and (Test-Path $env:STIVA_ICON)) { Set-ItemProperty -Path $key -Name IconUri -Value $env:STIVA_ICON }
-[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
-$title = [System.Security.SecurityElement]::Escape($env:STIVA_TITLE)
-$body = [System.Security.SecurityElement]::Escape($env:STIVA_BODY)
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$title</text><text>$body</text></binding></visual></toast>")
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Stiva').Show($toast)
-"#;
+fn toast_xml(title: &str, body: &str) -> String {
+    fn escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                // Characters XML cannot hold at all.
+                c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
+                c => out.push(c),
+            }
+        }
+        out
+    }
+    format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        escape(title),
+        escape(body)
+    )
+}
 
 #[cfg(windows)]
 mod imp {
-    use super::{TOAST_SCRIPT, base64};
+    use super::{APP_ID, toast_xml};
     use crate::after::TaskbarState;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::process::Command;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
     use windows::Win32::UI::Shell::{ITaskbarList3, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, TaskbarList};
+    use windows::core::HSTRING;
 
+    /// Shows the notification from a thread of its own, so the window never waits for Windows.
     pub fn notify(title: &str, body: &str) {
-        let utf16: Vec<u8> = TOAST_SCRIPT.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let (title, body) = (title.to_owned(), body.to_owned());
+        let _ = std::thread::Builder::new().name("notify".into()).spawn(move || {
+            let _ = show(&title, &body);
+        });
+    }
+
+    fn show(title: &str, body: &str) -> windows::core::Result<()> {
         // The program's icon as a file, which is what the notification wants to show next to the name.
         let icon = crate::deps::data_dir().join("icon.png");
         if !icon.is_file() {
             let _ = std::fs::create_dir_all(crate::deps::data_dir());
             let _ = std::fs::write(&icon, crate::icon::PNG);
         }
-        let mut cmd = Command::new("powershell.exe");
-        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand"])
-            .arg(base64(&utf16))
-            .env("STIVA_TITLE", title)
-            .env("STIVA_BODY", body)
-            .env("STIVA_ICON", icon);
-        crate::deps::quiet(&mut cmd);
-        let _ = cmd.spawn();
+        register_identity(&icon);
+        unsafe {
+            // This thread has not used Windows Runtime yet. "Already initialised" is fine.
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        }
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from(toast_xml(title, body)))?;
+        let toast = ToastNotification::CreateToastNotification(&xml)?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)
+    }
+
+    /// Unpackaged programs have no identity for Windows to attach a notification to, so Stiva registers one
+    /// for the current user (HKCU only): a name and an icon under the id "Stiva". The installer does the same.
+    fn register_identity(icon: &std::path::Path) {
+        let Ok(key) = windows_registry::CURRENT_USER.create(format!(r"Software\Classes\AppUserModelId\{APP_ID}")) else { return };
+        let _ = key.set_string("DisplayName", "Stiva");
+        if let Some(icon) = icon.to_str().filter(|_| icon.is_file()) {
+            let _ = key.set_string("IconUri", icon);
+        }
     }
 
     pub fn sleep() -> bool {
@@ -202,24 +219,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base64_matches_the_standard_alphabet_and_padding() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"a"), "YQ==");
-        assert_eq!(base64(b"ab"), "YWI=");
-        assert_eq!(base64(b"abc"), "YWJj");
-        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
-        // Known values, worked out with Python's base64 module.
-        assert_eq!(base64(&utf16("Write-Host hi")), "VwByAGkAdABlAC0ASABvAHMAdAAgAGgAaQA=");
-        assert_eq!(base64(&utf16("$x=1")), "JAB4AD0AMQA=");
-    }
-
-    #[test]
-    fn the_toast_script_takes_its_texts_from_the_environment_and_touches_only_the_users_hive() {
-        assert!(TOAST_SCRIPT.contains("$env:STIVA_TITLE") && TOAST_SCRIPT.contains("$env:STIVA_BODY"));
-        assert!(TOAST_SCRIPT.contains("SecurityElement]::Escape"), "texts are escaped before they go into the XML");
-        assert!(TOAST_SCRIPT.contains("HKCU:"), "the identity is registered for the current user only");
-        assert!(!TOAST_SCRIPT.contains("HKLM"));
-        assert!(!TOAST_SCRIPT.contains("Invoke-Expression") && !TOAST_SCRIPT.contains("iex "));
+    fn the_toast_has_both_texts_and_they_cannot_break_out_of_the_xml() {
+        let xml = toast_xml("Encoding finished", "2 files done");
+        assert!(xml.contains("<text>Encoding finished</text><text>2 files done</text>"));
+        let xml = toast_xml("a<b>&c", "\"x\" 'y'\u{1}");
+        assert!(xml.contains("<text>a&lt;b&gt;&amp;c</text>"));
+        assert!(xml.contains("&quot;x&quot; &apos;y&apos;</text>"), "{xml}");
+        assert_eq!(xml.matches("<text>").count(), 2, "nothing a file name holds can open a new element");
     }
 
     #[test]
