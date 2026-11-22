@@ -237,3 +237,9 @@ pub const DETAILS: &str = "Details";
 pub const BETTER: &str = "Better";
 pub const SMALLER: &str = "Smaller";
 pub const SOURCE_MORE: &str = "Tracks and range";
+
+// Queue and Add to queue
+pub const NOT_ADDED: &str = "Not added";
+pub const TIP_ADD: &str = "Put this file in the queue with the settings as they are, and set up another";
+pub const TIP_ADD_DISABLED: &str = "Open a file first";
+pub const TIP_QUEUE: &str = "The jobs that wait, the one that runs and the ones that are done";

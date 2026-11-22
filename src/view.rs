@@ -47,6 +47,7 @@ pub enum Action {
     Undo,
     DismissUndo,
     DismissRefused,
+    DismissToast,
     SetContainer(Container),
 }
 
@@ -131,6 +132,10 @@ fn audio_label(i: usize, t: &crate::probe::AudioTrack) -> String {
 impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let ready = self.tools().is_some();
+        let flash = self.flash_level();
+        if flash > 0.0 {
+            ui.ctx().request_repaint();
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_enabled_ui(ready, |ui| {
@@ -138,42 +143,27 @@ impl App {
                     actions.push(Action::OpenPicker);
                 }
             });
-            ui.add_enabled_ui(ready && matches!(self.src, Src::Ready(_)), |ui| {
-                if ui::pill(ui, s::ADD_TO_QUEUE, ui::Kind::Soft, 15.0).clicked() {
-                    actions.push(Action::AddToQueue);
-                }
-            });
+            // The way into the queue and the queue itself sit together, at the right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let kind = if self.show_options { ui::Kind::Selected } else { ui::Kind::Soft };
                 if ui::pill(ui, s::OPTIONS, kind, 15.0).clicked() {
                     self.show_options = !self.show_options;
                 }
-                if let Some(run) = &self.run {
-                    if ui::pill(ui, s::STOP, ui::Kind::Soft, 16.0).clicked() {
-                        actions.push(Action::Stop);
-                    }
-                    let (text, action) = if run.is_paused() { (s::RESUME, Action::Resume) } else { (s::PAUSE, Action::Pause) };
-                    let tip = if run.is_paused() { s::TIP_RESUME } else { s::TIP_PAUSE };
-                    if ui::pill(ui, text, ui::Kind::Primary, 16.0).on_hover_text(tip).clicked() {
-                        actions.push(action);
-                    }
-                } else {
-                    let n = self.to_encode();
-                    let text = if n > 1 { format!("{} {n} files", s::ENCODE) } else { s::ENCODE.to_string() };
-                    ui.add_enabled_ui(self.can_encode(), |ui| {
-                        if ui::pill(ui, &text, ui::Kind::Primary, 16.0).on_hover_text(s::TIP_ENCODE).clicked() {
-                            actions.push(Action::Encode);
-                        }
-                    });
-                }
-                let open = self.queue.open();
-                let (text, kind) = match self.page {
-                    Page::Editor => (if open > 0 { format!("{} ({open})", s::TO_QUEUE) } else { s::TO_QUEUE.to_string() }, ui::Kind::Soft),
-                    Page::Queue => (s::TO_EDITOR.to_string(), ui::Kind::Selected),
+                let queue = match self.page {
+                    Page::Editor => ui::queue_button(ui, s::TO_QUEUE, self.queue.open(), flash).on_hover_text(s::TIP_QUEUE),
+                    Page::Queue => ui::pill(ui, s::TO_EDITOR, ui::Kind::Selected, 15.0),
                 };
-                if ui::pill(ui, &text, kind, 15.0).clicked() {
+                if queue.clicked() {
                     actions.push(Action::TogglePage);
                 }
+                let can_add = ready && matches!(self.src, Src::Ready(_));
+                ui.add_enabled_ui(can_add, |ui| {
+                    let r = ui::pill(ui, s::ADD_TO_QUEUE, ui::Kind::Soft, 15.0);
+                    let r = if can_add { r.on_hover_text(s::TIP_ADD) } else { r.on_disabled_hover_text(s::TIP_ADD_DISABLED) };
+                    if r.clicked() {
+                        actions.push(Action::AddToQueue);
+                    }
+                });
             });
         });
     }
@@ -640,10 +630,35 @@ impl App {
 
     fn destination_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let shown = self.out_dir_for_display();
+        let paused = self.run.as_ref().map(Run::is_paused);
+        let n = self.to_encode();
+        let can_encode = self.can_encode();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label(muted(s::SAVE_TO));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The action of the window is at the bottom right, where the eye ends up.
+                match paused {
+                    Some(paused) => {
+                        if ui::pill(ui, s::STOP, ui::Kind::Soft, 16.0).clicked() {
+                            actions.push(Action::Stop);
+                        }
+                        let (text, action, tip) =
+                            if paused { (s::RESUME, Action::Resume, s::TIP_RESUME) } else { (s::PAUSE, Action::Pause, s::TIP_PAUSE) };
+                        if ui::pill(ui, text, ui::Kind::Primary, 16.0).on_hover_text(tip).clicked() {
+                            actions.push(action);
+                        }
+                    }
+                    None => {
+                        let text = if n > 1 { format!("{} {n} files", s::ENCODE) } else { s::ENCODE.to_string() };
+                        ui.add_enabled_ui(can_encode, |ui| {
+                            if ui::pill(ui, &text, ui::Kind::Primary, 16.0).on_hover_text(s::TIP_ENCODE).clicked() {
+                                actions.push(Action::Encode);
+                            }
+                        });
+                    }
+                }
+                ui.add_space(12.0);
                 let mut next = self.dest_mode_next();
                 if ui.checkbox(&mut next, s::NEXT_TO_SOURCE).changed() {
                     self.set.dest_mode = if next { DestMode::NextToSource } else { DestMode::Folder };
@@ -724,9 +739,6 @@ impl App {
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 right(ui, actions);
-                if matches!(report, Report::Added) && ui::button(ui, s::VIEW_QUEUE, ui::Kind::Soft).clicked() {
-                    actions.push(Action::ShowQueue);
-                }
                 if let Report::Done { out, .. } = report {
                     if ui::button(ui, s::OPEN, ui::Kind::Primary).clicked() {
                         actions.push(Action::OpenFile(out.clone()));
@@ -751,13 +763,6 @@ impl App {
                     Report::Skipped(p) => {
                         ui.label(RichText::new(s::SKIPPED).size(13.0).color(ui::WARN));
                         clipped(ui, muted(p.display().to_string()));
-                    }
-                    Report::Refused(why) => {
-                        ui.label(RichText::new(why.clone()).size(13.0).color(ui::WARN));
-                    }
-                    Report::Added => {
-                        ui.label(RichText::new(s::ADDED).size(14.0).strong().color(ui::SUCCESS));
-                        clipped(ui, muted(name.clone()));
                     }
                 });
             });
@@ -794,7 +799,29 @@ impl App {
         ui.add_space(12.0);
     }
 
-    /// One line, above the strip, that gives back what was just taken away.
+    /// The lines above the strip: what a click just did, and the way to take back what was taken away.
+    fn notices(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if let Some(t) = &self.toast {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui::close(ui).on_hover_text(s::DISMISS).clicked() {
+                        actions.push(Action::DismissToast);
+                    }
+                    if t.view_queue && ui::button(ui, s::VIEW_QUEUE, ui::Kind::Soft).clicked() {
+                        actions.push(Action::ShowQueue);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let color = if t.warn { ui::WARN } else { ui::SUCCESS };
+                        ui.label(RichText::new(&t.title).size(14.0).strong().color(color));
+                        clipped(ui, muted(&t.detail));
+                    });
+                });
+            });
+        }
+        self.undo_line(ui, actions);
+    }
+
+    /// One line that gives back what was just taken away.
     fn undo_line(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(text) = self.undo_text() else { return };
         ui.horizontal(|ui| {
@@ -1126,7 +1153,10 @@ impl App {
             Action::Pause => self.pause(),
             Action::Resume => self.resume(),
             Action::TogglePage => self.page = if self.page == Page::Editor { Page::Queue } else { Page::Editor },
-            Action::ShowQueue => self.page = Page::Queue,
+            Action::ShowQueue => {
+                self.page = Page::Queue;
+                self.toast = None;
+            }
             Action::RemoveItem(id) => self.remove_item(id),
             Action::RetryItem(id) => {
                 self.queue.retry(id);
@@ -1137,6 +1167,7 @@ impl App {
             Action::Undo => self.undo(),
             Action::DismissUndo => self.undo = None,
             Action::DismissRefused => self.refused.clear(),
+            Action::DismissToast => self.toast = None,
             Action::SetContainer(c) => {
                 let before = self.set.encode.clone();
                 self.set.encode.container = c;
@@ -1440,12 +1471,12 @@ impl eframe::App for App {
             egui::Panel::bottom("dest").frame(egui::Frame::new().fill(ui::PANEL).inner_margin(Margin::symmetric(16, 10))).show(ui, |ui| {
                 self.destination_bar(ui, &mut actions);
             });
-            self.expire_undo();
-            if self.undo.is_some() {
+            self.expire_notices();
+            if self.undo.is_some() || self.toast.is_some() {
                 egui::Panel::bottom("undo").frame(egui::Frame::new().fill(ui::PANEL).inner_margin(Margin::symmetric(16, 6))).show(
                     ui,
                     |ui| {
-                        self.undo_line(ui, &mut actions);
+                        self.notices(ui, &mut actions);
                     },
                 );
             }

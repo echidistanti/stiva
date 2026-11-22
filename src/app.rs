@@ -157,11 +157,23 @@ pub enum Report {
     },
     Cancelled,
     Skipped(PathBuf),
-    /// The job was refused before it started.
-    Refused(String),
-    /// The file went into the queue.
-    Added,
 }
+
+/// A line over the progress strip that says what a click just did: a file joined the queue, or could not.
+/// It has a life of its own, so it shows while an encode is running too.
+pub struct Toast {
+    pub title: String,
+    pub detail: String,
+    pub warn: bool,
+    /// Offers a button that opens the queue.
+    pub view_queue: bool,
+    pub until: Instant,
+}
+
+/// How long a toast stays.
+pub const TOAST_FOR: Duration = Duration::from_secs(9);
+/// How long the queue button glows after a job joined.
+pub const FLASH_FOR: Duration = Duration::from_millis(1800);
 
 pub struct Last {
     pub report: Report,
@@ -213,6 +225,9 @@ pub struct App {
     pub refused: Vec<(String, String)>,
     /// The last thing taken away, and until when it can be put back.
     pub undo: Option<(Undo, Instant)>,
+    pub toast: Option<Toast>,
+    /// When a job last joined the queue; the queue button glows for a moment after.
+    pub queue_flash: Option<Instant>,
     geom: Option<WindowGeom>,
     dirty: bool,
     last_save: Instant,
@@ -220,6 +235,8 @@ pub struct App {
     pending_open: Vec<PathBuf>,
     /// Debug builds only: start the encode as soon as the file is read, to look at the progress.
     auto_encode: bool,
+    /// Debug builds only: open this file once an encode is running, to look at adding during one.
+    debug_second: Option<PathBuf>,
 }
 
 /// What the file picker offers first. Any other file can still be chosen: ffprobe decides.
@@ -266,10 +283,13 @@ impl App {
             note: None,
             refused: vec![],
             undo: None,
+            toast: None,
+            queue_flash: None,
             dirty: false,
             last_save: Instant::now(),
             pending_open: open,
             auto_encode: cfg!(debug_assertions) && std::env::var_os("STIVA_AUTOENCODE").is_some(),
+            debug_second: if cfg!(debug_assertions) { std::env::var_os("STIVA_SECOND").map(PathBuf::from) } else { None },
         };
         app.start_setup(false);
         app
@@ -310,6 +330,11 @@ impl App {
 
     /// Takes in everything the threads have reported since the last frame.
     pub fn pump(&mut self) {
+        if self.run.is_some() && matches!(self.src, Src::Empty) {
+            if let Some(p) = self.debug_second.take() {
+                self.load_source(p);
+            }
+        }
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Setup(status, frac) => self.setup = Setup::Downloading { status, frac },
@@ -500,6 +525,7 @@ impl App {
             Ok(job) => {
                 self.queue.add(job);
                 self.queue_save();
+                self.flash_queue();
                 self.page = Page::Queue;
                 self.qtab = QueueTab::Queued;
             }
@@ -560,14 +586,15 @@ impl App {
                     self.queue.add_first(job);
                 } else {
                     self.queue.add(job);
+                    self.toast(crate::strings::ADDED, &name, false, true);
+                    self.flash_queue();
                 }
                 self.queue_save();
                 self.src = Src::Empty;
-                self.last = Some(Last { report: Report::Added, name, log: vec![] });
                 true
             }
             Err(why) => {
-                self.last = Some(Last { report: Report::Refused(why), name, log: vec![] });
+                self.toast(crate::strings::NOT_ADDED, &format!("{name}: {why}"), true, false);
                 false
             }
         }
@@ -914,11 +941,33 @@ impl App {
         self.ctx.request_repaint_after(UNDO_FOR + Duration::from_millis(50));
     }
 
-    /// Drops the undo once its time is up.
-    pub fn expire_undo(&mut self) {
-        if self.undo.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
+    /// Drops the undo and the toast once their time is up.
+    pub fn expire_notices(&mut self) {
+        let now = Instant::now();
+        if self.undo.as_ref().is_some_and(|(_, until)| now >= *until) {
             self.undo = None;
         }
+        if self.toast.as_ref().is_some_and(|t| now >= t.until) {
+            self.toast = None;
+        }
+    }
+
+    pub fn toast(&mut self, title: &str, detail: &str, warn: bool, view_queue: bool) {
+        self.toast = Some(Toast { title: title.into(), detail: detail.into(), warn, view_queue, until: Instant::now() + TOAST_FOR });
+        self.ctx.request_repaint_after(TOAST_FOR + Duration::from_millis(50));
+    }
+
+    /// Makes the queue button glow, so the eye finds where the job went.
+    pub fn flash_queue(&mut self) {
+        self.queue_flash = Some(Instant::now());
+        self.ctx.request_repaint();
+    }
+
+    /// How much the queue button glows now, from 1 down to 0.
+    pub fn flash_level(&self) -> f32 {
+        let Some(at) = self.queue_flash else { return 0.0 };
+        let t = at.elapsed().as_secs_f32() / FLASH_FOR.as_secs_f32();
+        if t >= 1.0 { 0.0 } else { (1.0 - t) * (1.0 - t) }
     }
 
     /// What the Undo line says, if there is one.

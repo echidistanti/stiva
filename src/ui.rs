@@ -181,6 +181,52 @@ pub fn pill(ui: &mut Ui, text: &str, kind: Kind, size: f32) -> Response {
     resp
 }
 
+/// The queue button: the number of jobs in a badge, an accent outline while there are any, and a ring that
+/// fades for a moment after one joined (`flash` from 1 down to 0), so the eye finds where it went.
+pub fn queue_button(ui: &mut Ui, text: &str, count: usize, flash: f32) -> Response {
+    let size = 15.0;
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(size), TEXT);
+    let badge = (count > 0).then(|| ui.painter().layout_no_wrap(count.to_string(), FontId::proportional(13.0), ON_ACCENT));
+    let pad = vec2(size * 0.95, size * 0.5);
+    let badge_w = badge.as_ref().map_or(0.0, |b| (b.size().x + 12.0).max(22.0));
+    let gap = if badge.is_some() { 8.0 } else { 0.0 };
+    let size_all =
+        vec2(pad.x * 2.0 + galley.size().x + gap + badge_w - if badge.is_some() { 4.0 } else { 0.0 }, galley.size().y + pad.y * 2.0);
+    let (rect, resp) = ui.allocate_exact_size(size_all, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hot = resp.hovered() && ui.is_enabled();
+        let base = if hot { HOVER } else { FIELD };
+        let fill = lerp_color(base, ACCENT_DIM, flash);
+        let stroke = if count > 0 { Stroke::new(1.5, ACCENT) } else { Stroke::NONE };
+        ui.painter().rect(rect, CornerRadius::same(255), fill, stroke, StrokeKind::Inside);
+        if flash > 0.0 {
+            let ring = rect.expand(2.0 + 5.0 * (1.0 - flash));
+            ui.painter().rect_stroke(
+                ring,
+                CornerRadius::same(255),
+                Stroke::new(2.5, ACCENT_TEXT.gamma_multiply(flash)),
+                StrokeKind::Middle,
+            );
+        }
+        let at = pos2(rect.left() + pad.x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley_with_override_text_color(at, galley, TEXT);
+        if let Some(b) = badge {
+            let c = pos2(rect.right() - 6.0 - badge_w / 2.0, rect.center().y);
+            ui.painter().rect_filled(Rect::from_center_size(c, vec2(badge_w, 22.0)), CornerRadius::same(255), ACCENT_FILL);
+            ui.painter().galley_with_override_text_color(c - b.size() / 2.0, b, ON_ACCENT);
+        }
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
 /// Small button for the usual size of text.
 pub fn button(ui: &mut Ui, text: &str, kind: Kind) -> Response {
     pill(ui, text, kind, 14.0)
