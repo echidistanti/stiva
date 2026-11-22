@@ -3282,12 +3282,14 @@ dependencies = [
  "dirs",
  "eframe",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "sevenz-rust2",
  "sha2",
  "ureq",
+ "windows",
  "winresource",
 ]
 

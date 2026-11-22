@@ -17,6 +17,11 @@ sevenz-rust2 = { version = "0.25.0", default-features = false }
 sha2 = "0.11.1"
 ureq = "3.5.2"
 
+[target.'cfg(windows)'.dependencies]
+# The progress on the taskbar button. Same major as the one eframe's dependencies already bring.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
+raw-window-handle = "0.6"
+
 [build-dependencies]
 winresource = "0.1.34"
 

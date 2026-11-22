@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod after;
 mod app;
 mod caps;
 mod deps;
@@ -7,6 +8,7 @@ mod encode;
 mod filters;
 mod icon;
 mod model;
+mod platform;
 mod presets;
 mod probe;
 mod queue;

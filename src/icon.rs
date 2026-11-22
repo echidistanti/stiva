@@ -1,7 +1,8 @@
 //! The program's icon for its windows. The one Explorer and shortcuts show comes from the
 //! executable's resources instead (build.rs).
 
-const PNG: &[u8] = include_bytes!("../assets/icon-128.png");
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const PNG: &[u8] = include_bytes!("../assets/icon-128.png");
 
 /// RGBA pixels, width and height.
 pub fn rgba() -> Option<(Vec<u8>, u32, u32)> {

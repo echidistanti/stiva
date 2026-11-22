@@ -243,3 +243,12 @@ pub const NOT_ADDED: &str = "Not added";
 pub const TIP_ADD: &str = "Put this file in the queue with the settings as they are, and set up another";
 pub const TIP_ADD_DISABLED: &str = "Open a file first";
 pub const TIP_QUEUE: &str = "The jobs that wait, the one that runs and the ones that are done";
+
+// When done
+pub const WHEN_DONE: &str = "When done";
+pub const POWER_SHUTDOWN: &str = "The PC will shut down in";
+pub const POWER_SLEEP: &str = "The PC will go to sleep in";
+pub const POWER_BODY: &str = "Encoding is finished. Press Cancel to keep the PC on.";
+pub const POWER_CANCEL: &str = "Cancel";
+pub const POWER_NOW_SHUTDOWN: &str = "Shut down now";
+pub const POWER_NOW_SLEEP: &str = "Sleep now";

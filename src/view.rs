@@ -1,6 +1,7 @@
 //! Everything that is drawn. The state lives in `app`; this file reads it and records what the user did
 //! as `Action`s, which are carried out after the frame has been drawn.
 
+use crate::after::WhenDone;
 use crate::app::{self, App, Last, Page, QueueTab, Report, Run, Setup, Source, Src, Tab};
 use crate::encode::Job;
 use crate::filters::{self, Crop, Deinterlace, Filters, Margins, Rotate, Strength};
@@ -48,6 +49,8 @@ pub enum Action {
     DismissUndo,
     DismissRefused,
     DismissToast,
+    CancelPower,
+    PowerNow,
     SetContainer(Container),
 }
 
@@ -683,12 +686,20 @@ impl App {
             let name = run.job.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let frac = run.progress.and_then(|p| p.fraction(span));
             ui.horizontal(|ui| {
-                if run.is_paused() {
-                    ui.label(RichText::new(s::PAUSED).size(14.0).strong().color(ui::WARN));
-                } else {
-                    ui.label(RichText::new(s::ENCODING).size(14.0).strong());
-                }
-                clipped(ui, muted(name));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The queue page has its own, so the choice is never there twice.
+                    if self.page == Page::Editor {
+                        when_done_box(ui, "when_done_strip", &mut self.when_done);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if run.is_paused() {
+                            ui.label(RichText::new(s::PAUSED).size(14.0).strong().color(ui::WARN));
+                        } else {
+                            ui.label(RichText::new(s::ENCODING).size(14.0).strong());
+                        }
+                        clipped(ui, muted(name));
+                    });
+                });
             });
             ui.add_space(4.0);
             ui::bar(ui, frac, ui::ACCENT);
@@ -769,6 +780,33 @@ impl App {
         });
         if !log.is_empty() {
             log_box(ui, log, matches!(report, Report::Failed { .. }), "log_last");
+        }
+    }
+
+    /// The few seconds before a sleep or a shutdown, in which it can still be called off.
+    fn power_modal(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some((what, left)) = self.power_left() else { return };
+        let (title, now) = match what {
+            WhenDone::Shutdown => (s::POWER_SHUTDOWN, s::POWER_NOW_SHUTDOWN),
+            _ => (s::POWER_SLEEP, s::POWER_NOW_SLEEP),
+        };
+        egui::Modal::new(egui::Id::NULL.with("power")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(RichText::new(format!("{title} {left} s")).size(17.0).strong());
+            ui.add_space(4.0);
+            ui.label(muted(s::POWER_BODY));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui::pill(ui, s::POWER_CANCEL, ui::Kind::Primary, 14.0).clicked() {
+                    actions.push(Action::CancelPower);
+                }
+                if ui::button(ui, now, ui::Kind::Soft).clicked() {
+                    actions.push(Action::PowerNow);
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            actions.push(Action::CancelPower);
         }
     }
 
@@ -900,6 +938,7 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                when_done_box(ui, "when_done_queue", &mut self.when_done);
                 if self.qtab == QueueTab::Completed && finished > 0 && ui::button(ui, s::CLEAR_COMPLETED, ui::Kind::Ghost).clicked() {
                     actions.push(Action::ClearFinished);
                 }
@@ -1168,6 +1207,12 @@ impl App {
             Action::DismissUndo => self.undo = None,
             Action::DismissRefused => self.refused.clear(),
             Action::DismissToast => self.toast = None,
+            Action::CancelPower => self.power = None,
+            Action::PowerNow => {
+                if let Some(p) = &mut self.power {
+                    p.at = std::time::Instant::now();
+                }
+            }
             Action::SetContainer(c) => {
                 let before = self.set.encode.clone();
                 self.set.encode.container = c;
@@ -1222,6 +1267,16 @@ impl App {
             }
         }
     }
+}
+
+/// "When done" choice, the same in the strip and on the queue page.
+fn when_done_box(ui: &mut egui::Ui, id: &str, value: &mut WhenDone) {
+    egui::ComboBox::from_id_salt(id).selected_text(value.label()).width(150.0).show_ui(ui, |ui| {
+        for w in WhenDone::ALL {
+            ui.selectable_value(value, w, w.label());
+        }
+    });
+    ui.label(muted(s::WHEN_DONE));
 }
 
 fn filters_tab(ui: &mut egui::Ui, f: &mut Filters) {
@@ -1447,8 +1502,10 @@ const WIDE_AT: f32 = 960.0;
 const SOURCE_WIDTH: f32 = 340.0;
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.pump();
+        self.tick_power();
+        self.update_taskbar(frame);
         let ctx = ui.ctx().clone();
         self.track_window(&ctx);
         self.accept_drops(&ctx);
@@ -1529,6 +1586,7 @@ impl eframe::App for App {
             self.options_area(&ctx, &mut actions);
         }
         self.ask_modal(&ctx, &mut actions);
+        self.power_modal(&ctx, &mut actions);
         self.preset_modals(&ctx);
         self.quit_modal(&ctx);
         ui::border(&ctx);

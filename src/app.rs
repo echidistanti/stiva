@@ -2,10 +2,12 @@
 //! Work that takes time (finding ffmpeg, reading a file, encoding) runs on threads that report
 //! through a channel; the window drains it at the start of every frame.
 
+use crate::after::{self, Batch, TaskbarState, WhenDone};
 use crate::caps::Capabilities;
 use crate::deps::{self, Tools};
 use crate::encode::{self, Event, Handle, Job, Outcome, Progress};
 use crate::model::{Container, EncodeSettings, VideoCodec};
+use crate::platform;
 use crate::presets::{self, Preset};
 use crate::probe::{self, SourceInfo};
 use crate::queue::{Item, Queue, State};
@@ -181,6 +183,12 @@ pub struct Last {
     pub log: Vec<String>,
 }
 
+/// A sleep or a shutdown that is counting down, so the user can still say no.
+pub struct Power {
+    pub what: WhenDone,
+    pub at: Instant,
+}
+
 /// Something the user took away and can have back for a few seconds.
 pub enum Undo {
     Item(Item, usize),
@@ -226,6 +234,12 @@ pub struct App {
     /// The last thing taken away, and until when it can be put back.
     pub undo: Option<(Undo, Instant)>,
     pub toast: Option<Toast>,
+    /// What to do when the queue runs dry. Not saved: it starts as "Do nothing" every time.
+    pub when_done: WhenDone,
+    /// What the current run of the queue has done so far.
+    pub batch: Batch,
+    pub power: Option<Power>,
+    pub taskbar: platform::Taskbar,
     /// When a job last joined the queue; the queue button glows for a moment after.
     pub queue_flash: Option<Instant>,
     geom: Option<WindowGeom>,
@@ -284,6 +298,21 @@ impl App {
             refused: vec![],
             undo: None,
             toast: None,
+            // Debug builds only: STIVA_WHENDONE=sleep|shutdown|close|folder, to look at the choices without clicking.
+            when_done: if cfg!(debug_assertions) {
+                match std::env::var("STIVA_WHENDONE").as_deref() {
+                    Ok("sleep") => WhenDone::Sleep,
+                    Ok("shutdown") => WhenDone::Shutdown,
+                    Ok("close") => WhenDone::CloseApp,
+                    Ok("folder") => WhenDone::OpenFolder,
+                    _ => WhenDone::default(),
+                }
+            } else {
+                WhenDone::default()
+            },
+            batch: Batch::default(),
+            power: None,
+            taskbar: platform::Taskbar::default(),
             queue_flash: None,
             dirty: false,
             last_save: Instant::now(),
@@ -426,11 +455,15 @@ impl App {
                 let name = run.job.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let stopped = matches!(outcome, Outcome::Cancelled);
                 let (report, state) = match outcome {
-                    Outcome::Finished { out, bytes, elapsed } => (
-                        Report::Done { out: out.clone(), from: run.job.src.size, bytes, elapsed },
-                        State::Done { out, bytes, secs: run.active().as_secs_f64() },
-                    ),
+                    Outcome::Finished { out, bytes, elapsed } => {
+                        self.batch.finished_one(out.clone(), run.job.src.size, bytes);
+                        (
+                            Report::Done { out: out.clone(), from: run.job.src.size, bytes, elapsed },
+                            State::Done { out, bytes, secs: run.active().as_secs_f64() },
+                        )
+                    }
                     Outcome::Failed { code, tail } => {
+                        self.batch.failed_one();
                         let why = tail.last().cloned().unwrap_or_else(|| format!("ffmpeg stopped with code {}", code.unwrap_or(-1)));
                         (Report::Failed { code, tail }, State::Failed(why))
                     }
@@ -449,6 +482,75 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The queue ran dry by itself: tell the user if they are elsewhere, and do what they chose for this moment.
+    /// Nothing but the notification happens when every job failed, so a PC does not switch itself off over errors nobody saw.
+    fn finish_batch(&mut self) {
+        let b = std::mem::take(&mut self.batch);
+        if b.ended() == 0 {
+            return;
+        }
+        let power = self.when_done.grace().is_some();
+        if !power && !platform::focused(&self.ctx) {
+            let (title, text) = b.summary();
+            platform::notify(&title, &text);
+        }
+        if b.done == 0 {
+            return;
+        }
+        match self.when_done {
+            WhenDone::Nothing => {}
+            WhenDone::OpenFolder => {
+                if let Some(dir) = b.last_out.as_deref().and_then(Path::parent) {
+                    open_path(dir);
+                }
+            }
+            WhenDone::CloseApp => {
+                self.quit_confirmed = true;
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            what @ (WhenDone::Sleep | WhenDone::Shutdown) => {
+                let wait = what.grace().unwrap_or_default();
+                self.power = Some(Power { what, at: Instant::now() + wait });
+            }
+        }
+    }
+
+    /// Carries out a sleep or shutdown whose time has come.
+    pub fn tick_power(&mut self) {
+        let Some(p) = &self.power else { return };
+        if Instant::now() < p.at {
+            self.ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        let what = p.what;
+        self.power = None;
+        let ok = match what {
+            WhenDone::Sleep => platform::sleep(),
+            WhenDone::Shutdown => platform::shutdown(),
+            _ => true,
+        };
+        if !ok {
+            self.toast(&format!("Could not {}", what.label().to_lowercase()), "Windows did not accept it.", true, false);
+        }
+    }
+
+    /// Seconds left before the sleep or shutdown, for the window that counts them.
+    pub fn power_left(&self) -> Option<(WhenDone, u64)> {
+        self.power.as_ref().map(|p| (p.what, p.at.saturating_duration_since(Instant::now()).as_secs() + 1))
+    }
+
+    /// Puts the progress of the run on the taskbar button.
+    pub fn update_taskbar(&mut self, frame: &eframe::Frame) {
+        let state = match &self.run {
+            Some(run) => {
+                let fraction = run.progress.and_then(|p| p.fraction(run.job.span()));
+                after::taskbar_state(fraction, run.is_paused(), self.batch.ended(), self.queue.waiting())
+            }
+            None => TaskbarState::None,
+        };
+        self.taskbar.set(frame, state);
     }
 
     pub fn open_picker(&self) {
@@ -613,6 +715,10 @@ impl App {
         if matches!(self.src, Src::Ready(_)) && !self.add_current(true) {
             return;
         }
+        if !self.processing {
+            self.batch = Batch::default();
+        }
+        self.power = None;
         self.processing = true;
         self.start_next();
     }
@@ -624,11 +730,13 @@ impl App {
         }
         let Some(id) = self.queue.next_waiting() else {
             self.processing = false;
+            self.finish_batch();
             return;
         };
         let Some(item) = self.queue.get(id) else { return };
         let job = item.job.clone();
         let refuse = |app: &mut App, why: String| {
+            app.batch.failed_one();
             if let Some(item) = app.queue.get_mut(id) {
                 item.state = State::Failed(why.clone());
             }
