@@ -27,7 +27,6 @@ pub const READING: &str = "Reading";
 pub const CLOSE_SOURCE: &str = "Close this file";
 pub const AUDIO_TRACKS: &str = "Audio tracks";
 pub const NO_AUDIO: &str = "This file has no audio.";
-pub const SUBTITLES_NOT_YET: &str = "Subtitles in the file are not carried over yet.";
 pub const RANGE_LABEL: &str = "Encode from";
 pub const RANGE_TO: &str = "to";
 pub const RANGE_HINT: &str = "Leave both empty for the whole file. Write seconds (90) or 1:30 or 1:02:03.";
@@ -37,6 +36,7 @@ pub const RANGE_BAD_END: &str = "The end time is not valid. Use 90, 1:30 or 1:02
 // Settings tabs
 pub const TAB_CONTAINER: &str = "Container";
 pub const TAB_SIZING: &str = "Sizing";
+pub const TAB_FILTERS: &str = "Filters";
 pub const TAB_VIDEO: &str = "Video";
 pub const TAB_AUDIO: &str = "Audio";
 pub const FORMAT: &str = "Format";
@@ -45,7 +45,6 @@ pub const FORMAT_NOTE_MKV: &str = "Holds any codec, several audio tracks and cha
 pub const FORMAT_NOTE_WEBM: &str = "For the web: VP9 or AV1 video with Opus or Vorbis audio.";
 pub const FORMAT_NOTE_AUDIO: &str = "Only the sound is kept.";
 pub const VIDEO_CODEC: &str = "Codec";
-pub const VIDEO_QUALITY: &str = "Quality (CRF)";
 pub const VIDEO_QUALITY_HINT_HW: &str = "Lower is better and bigger. The scale is the chip's own, not the same as x264.";
 pub const HARDWARE_NOTE: &str =
     "Runs on the graphics chip: much faster, but the file comes out bigger than with x264 or x265 at the same look.";
@@ -161,3 +160,51 @@ pub const PRESET_DELETE_YES: &str = "Delete";
 pub const PRESET_DELETE_NO: &str = "Keep it";
 pub const CANCEL: &str = "Cancel";
 pub const STOPPED_SHORT: &str = "Stopped";
+
+// Rate
+pub const RATE_MODE: &str = "Rate control";
+pub const RATE_QUALITY: &str = "Quality";
+pub const RATE_BITRATE: &str = "Video bitrate";
+pub const RATE_SIZE: &str = "File size";
+pub const RATE_BITRATE_HINT: &str = "The average the video aims at. Higher is better and bigger.";
+pub const RATE_SIZE_HINT: &str =
+    "The video bitrate is worked out from the length of the file and the audio, so the result comes close to this size.";
+pub const RATE_SIZE_NEEDS_FILE: &str = "Open a file to see the bitrate this gives.";
+pub const RATE_NEEDS_CHIP_TEST: &str = "Only constant quality works with this encoder on this PC.";
+pub const TWO_PASS: &str = "Two passes";
+pub const TWO_PASS_HINT: &str = "Reads the file twice: slower, and the bits go where the picture needs them.";
+
+// Filters
+pub const FILTER_CROP: &str = "Crop";
+pub const FILTER_CROP_NONE: &str = "No crop";
+pub const FILTER_CROP_AUTO: &str = "Automatic (cut the black bars)";
+pub const FILTER_CROP_MANUAL: &str = "By hand";
+pub const FILTER_CROP_AUTO_HINT: &str =
+    "When the encode starts, a few seconds are read at several points of the file to find black bars. What is not black everywhere stays.";
+pub const FILTER_CROP_MANUAL_HINT: &str = "Pixels cut from each side of the original picture.";
+pub const FILTER_LEFT: &str = "Left";
+pub const FILTER_TOP: &str = "Top";
+pub const FILTER_RIGHT: &str = "Right";
+pub const FILTER_BOTTOM: &str = "Bottom";
+pub const FILTER_ROTATE: &str = "Rotate";
+pub const FILTER_FLIP_H: &str = "Flip left to right";
+pub const FILTER_FLIP_V: &str = "Flip top to bottom";
+pub const FILTER_DEINTERLACE: &str = "Deinterlace";
+pub const FILTER_DEINTERLACE_HINT: &str = "For old TV recordings and DVDs, where moving edges show comb-like lines.";
+pub const FILTER_DETELECINE: &str = "Detelecine";
+pub const FILTER_DETELECINE_ON: &str = "Undo the 3:2 pulldown";
+pub const FILTER_DETELECINE_HINT: &str = "For film that was shown on TV. It drops one picture in five, so use it only on such files.";
+pub const FILTER_DENOISE: &str = "Denoise";
+pub const FILTER_DENOISE_HINT: &str = "Smooths grain and noise. Strong also softens detail.";
+pub const FILTER_SHARPEN: &str = "Sharpen";
+pub const FILTER_GRAYSCALE: &str = "Black and white";
+pub const FILTER_CUSTOM: &str = "Your own filter";
+pub const FILTER_CUSTOM_HINT: &str = "ffmpeg video filters, separated by commas, added after the others. Example: eq=brightness=0.05";
+pub const FILTER_ORDER_NOTE: &str =
+    "They run in this order: detelecine, deinterlace, crop, rotate, denoise, sharpen, black and white, the size limit, your own.";
+
+// Subtitles
+pub const SUBTITLE_TRACKS: &str = "Subtitles";
+pub const SUBTITLE_NONE_HERE: &str = "Subtitles are not kept in this format.";
+pub const SUBTITLE_PICTURES: &str = "does not fit MP4";
+pub const SUBTITLE_HINT_MP4: &str = "MP4 keeps text subtitles only; the picture kind from DVDs and Blu-rays needs MKV.";

@@ -1,6 +1,7 @@
 //! What the user chooses for one encode: container, video codec and quality, audio codec.
 //! Plain data with the rules about which choices go together; no I/O and no drawing.
 
+use crate::filters::Filters;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -84,6 +85,34 @@ impl Container {
     }
 }
 
+/// How the video is steered: by a quality level, or towards an average bitrate in kilobits a second.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rate {
+    Quality(u32),
+    Kbps(u32),
+}
+
+/// What the user fixes in the Video tab: the quality, the average bitrate, or the size of the file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum RateMode {
+    #[default]
+    Quality,
+    Bitrate,
+    TargetSize,
+}
+
+impl RateMode {
+    pub const ALL: [RateMode; 3] = [RateMode::Quality, RateMode::Bitrate, RateMode::TargetSize];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RateMode::Quality => "Constant quality",
+            RateMode::Bitrate => "Average bitrate",
+            RateMode::TargetSize => "Target file size",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VideoCodec {
     X264,
@@ -154,6 +183,11 @@ impl VideoCodec {
         !matches!(self, VideoCodec::H264Amf | VideoCodec::H264Nvenc | VideoCodec::H264Qsv)
     }
 
+    /// Two passes need the encoder to keep statistics between runs, which the graphics chips cannot.
+    pub fn can_two_pass(self) -> bool {
+        !self.is_hardware()
+    }
+
     pub fn is_hevc(self) -> bool {
         matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv)
     }
@@ -209,11 +243,10 @@ impl VideoCodec {
         }
     }
 
-    /// The ffmpeg options for this codec at a given quality and speed. The test encode that decides whether a
+    /// The ffmpeg options for this codec at a given rate and speed. The test encode that decides whether a
     /// hardware encoder is offered uses these same options, so what passes the test is what the real encode runs.
-    pub fn args(self, crf: u32, preset: &str, bits: u8) -> Vec<String> {
+    pub fn args(self, rate: Rate, preset: &str, bits: u8) -> Vec<String> {
         use VideoCodec::*;
-        let crf = crf.to_string();
         // Graphics chips take NV12 (8-bit) or P010 (10-bit); the software encoders take planar YUV.
         let pix = match (self.is_hardware(), bits >= 10) {
             (false, false) => "yuv420p",
@@ -221,21 +254,41 @@ impl VideoCodec {
             (true, false) => "nv12",
             (true, true) => "p010le",
         };
-        let mut a: Vec<&str> = vec!["-c:v", self.encoder()];
-        match self {
-            X264 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix]),
-            X265 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix, "-x265-params", "log-level=error"]),
-            SvtAv1 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix]),
-            Vp9 => a.extend(["-crf", &crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset, "-pix_fmt", pix]),
-            // Constant quantizer; the other rate modes come with the bitrate options.
-            H264Amf | HevcAmf | Av1Amf => a.extend(["-quality", preset, "-rc", "cqp", "-qp_i", &crf, "-qp_p", &crf, "-pix_fmt", pix]),
-            // Variable bitrate steered by a quality level, with no bitrate cap.
-            H264Nvenc | HevcNvenc | Av1Nvenc => {
-                a.extend(["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &crf, "-b:v", "0", "-pix_fmt", pix])
+        let mut a: Vec<String> = vec!["-c:v".into(), self.encoder().into()];
+        let mut add = |items: &[&str]| a.extend(items.iter().map(|s| s.to_string()));
+        match (rate, self) {
+            (Rate::Quality(q), _) => {
+                let q = q.to_string();
+                match self {
+                    X264 => add(&["-preset", preset, "-crf", &q]),
+                    X265 => add(&["-preset", preset, "-crf", &q]),
+                    SvtAv1 => add(&["-preset", preset, "-crf", &q]),
+                    Vp9 => add(&["-crf", &q, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset]),
+                    // Constant quantizer; the average bitrate has its own options below.
+                    H264Amf | HevcAmf | Av1Amf => add(&["-quality", preset, "-rc", "cqp", "-qp_i", &q, "-qp_p", &q]),
+                    // Variable bitrate steered by a quality level, with no bitrate cap.
+                    H264Nvenc | HevcNvenc | Av1Nvenc => add(&["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &q, "-b:v", "0"]),
+                    H264Qsv | HevcQsv | Av1Qsv => add(&["-preset", preset, "-global_quality", &q]),
+                }
             }
-            H264Qsv | HevcQsv | Av1Qsv => a.extend(["-preset", preset, "-global_quality", &crf, "-pix_fmt", pix]),
+            (Rate::Kbps(k), _) => {
+                let (avg, peak) = (format!("{k}k"), format!("{}k", k + k / 2));
+                match self {
+                    X264 | X265 | SvtAv1 => add(&["-preset", preset, "-b:v", &avg]),
+                    Vp9 => add(&["-b:v", &avg, "-row-mt", "1", "-cpu-used", preset]),
+                    H264Amf | HevcAmf | Av1Amf => add(&["-quality", preset, "-rc", "vbr_peak", "-b:v", &avg, "-maxrate", &peak]),
+                    H264Nvenc | HevcNvenc | Av1Nvenc => {
+                        add(&["-preset", preset, "-tune", "hq", "-rc", "vbr", "-b:v", &avg, "-maxrate", &peak])
+                    }
+                    H264Qsv | HevcQsv | Av1Qsv => add(&["-preset", preset, "-b:v", &avg, "-maxrate", &peak]),
+                }
+            }
         }
-        a.into_iter().map(String::from).collect()
+        add(&["-pix_fmt", pix]);
+        if self == X265 {
+            add(&["-x265-params", "log-level=error"]);
+        }
+        a
     }
 }
 
@@ -350,6 +403,14 @@ pub struct EncodeSettings {
     pub bit_depth: u8,
     /// Longest and shortest side the picture may have; larger pictures are scaled down, never up.
     pub max_size: Option<(u32, u32)>,
+    pub rate: RateMode,
+    /// The average bitrate of the video, in kilobits a second, for `RateMode::Bitrate`.
+    pub video_kbps: u32,
+    /// The size the file should come to, in megabytes, for `RateMode::TargetSize`.
+    pub target_mb: u32,
+    /// Two runs over the file for a steadier result at the same bitrate; only with a bitrate or a size.
+    pub two_pass: bool,
+    pub filters: Filters,
 }
 
 impl Default for EncodeSettings {
@@ -365,6 +426,11 @@ impl Default for EncodeSettings {
             gain_db: 0.0,
             bit_depth: 8,
             max_size: None,
+            rate: RateMode::Quality,
+            video_kbps: 2500,
+            target_mb: 700,
+            two_pass: false,
+            filters: Filters::default(),
         }
     }
 }
@@ -396,7 +462,20 @@ impl EncodeSettings {
         self.gain_db = self.gain_db.clamp(-30.0, 30.0);
         self.max_size = self.max_size.map(|(a, b)| (a.clamp(64, 16384), b.clamp(64, 16384)));
         self.bit_depth = if self.bit_depth >= 10 && self.video_codec.can_ten_bit() { 10 } else { 8 };
+        self.video_kbps = self.video_kbps.clamp(50, 200_000);
+        self.target_mb = self.target_mb.clamp(1, 200_000);
+        self.two_pass = self.two_pass && self.rate != RateMode::Quality && self.video_codec.can_two_pass();
+        self.filters.normalize();
         changed
+    }
+
+    /// How the video is steered, given the bitrate worked out for a target size when that is the mode.
+    pub fn rate_with(&self, target_kbps: Option<u32>) -> Rate {
+        match self.rate {
+            RateMode::Quality => Rate::Quality(self.crf),
+            RateMode::Bitrate => Rate::Kbps(self.video_kbps),
+            RateMode::TargetSize => Rate::Kbps(target_kbps.unwrap_or(self.video_kbps)),
+        }
     }
 
     /// The user picked another video codec: start from that codec's usual quality and speed.
@@ -468,7 +547,7 @@ mod tests {
             let (lo, hi) = c.crf_range();
             assert!((lo..=hi).contains(&c.default_crf()), "{c:?} quality");
             assert!(c.presets().contains(&c.default_preset()), "{c:?} speed");
-            let args = c.args(c.default_crf(), c.default_preset(), 8);
+            let args = c.args(Rate::Quality(c.default_crf()), c.default_preset(), 8);
             assert_eq!(&args[..2], ["-c:v", c.encoder()], "{c:?}");
         }
     }
@@ -492,6 +571,44 @@ mod tests {
         s.set_video_codec(VideoCodec::HevcNvenc);
         s.normalize();
         assert_eq!(s.video_codec, VideoCodec::Vp9, "H.265 does not fit WebM");
+    }
+
+    #[test]
+    fn a_bitrate_replaces_the_quality_in_every_codec() {
+        for c in VideoCodec::ALL {
+            let q = c.args(Rate::Quality(c.default_crf()), c.default_preset(), 8).join(" ");
+            let b = c.args(Rate::Kbps(1500), c.default_preset(), 8).join(" ");
+            assert!(b.contains("-b:v 1500k"), "{c:?}: {b}");
+            assert!(!b.contains("-crf") && !b.contains("-cq ") && !b.contains("-qp_") && !b.contains("-global_quality"), "{c:?}: {b}");
+            assert!(b.contains("-pix_fmt"), "{c:?}: {b}");
+            assert_ne!(q, b);
+        }
+        assert!(VideoCodec::X265.args(Rate::Kbps(900), "medium", 8).join(" ").contains("log-level=error"));
+        assert!(VideoCodec::HevcAmf.args(Rate::Kbps(1000), "balanced", 8).join(" ").contains("-maxrate 1500k"));
+    }
+
+    #[test]
+    fn two_passes_need_a_bitrate_and_a_software_encoder() {
+        let mut s = EncodeSettings { two_pass: true, ..Default::default() };
+        s.normalize();
+        assert!(!s.two_pass, "quality mode has nothing to plan");
+        s.rate = RateMode::Bitrate;
+        s.two_pass = true;
+        s.normalize();
+        assert!(s.two_pass);
+        s.set_video_codec(VideoCodec::HevcAmf);
+        s.normalize();
+        assert!(!s.two_pass, "a graphics chip cannot do two passes");
+    }
+
+    #[test]
+    fn the_target_size_uses_the_bitrate_worked_out_for_it() {
+        let mut s = EncodeSettings { rate: RateMode::TargetSize, ..Default::default() };
+        assert_eq!(s.rate_with(Some(1234)), Rate::Kbps(1234));
+        s.rate = RateMode::Bitrate;
+        assert_eq!(s.rate_with(Some(1234)), Rate::Kbps(2500));
+        s.rate = RateMode::Quality;
+        assert_eq!(s.rate_with(None), Rate::Quality(22));
     }
 
     #[test]

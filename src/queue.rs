@@ -2,7 +2,7 @@
 //! from the top; this file only knows what is in the list and in which state.
 
 use crate::encode::Job;
-use crate::model::{AudioCodec, EncodeSettings, SIZE_STEPS};
+use crate::model::{AudioCodec, EncodeSettings, RateMode, SIZE_STEPS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -131,13 +131,23 @@ impl Queue {
 pub fn summary(s: &EncodeSettings) -> String {
     let mut parts = vec![s.container.ext().to_uppercase()];
     if !s.container.audio_only() {
-        parts.push(format!("{}, quality {}", s.video_codec.label(), s.crf));
+        parts.push(match s.rate {
+            RateMode::Quality => format!("{}, quality {}", s.video_codec.label(), s.crf),
+            RateMode::Bitrate => format!("{}, {} kb/s{}", s.video_codec.label(), s.video_kbps, if s.two_pass { ", 2 passes" } else { "" }),
+            RateMode::TargetSize => {
+                format!("{}, about {} MB{}", s.video_codec.label(), s.target_mb, if s.two_pass { ", 2 passes" } else { "" })
+            }
+        });
         if s.bit_depth >= 10 {
             parts.push("10-bit".into());
         }
         if let Some((l, sh)) = s.max_size {
             let name = SIZE_STEPS.iter().find(|(_, a, b)| (*a, *b) == (l, sh)).map(|(n, ..)| n.to_string());
             parts.push(format!("up to {}", name.unwrap_or_else(|| format!("{l} x {sh}"))));
+        }
+        let filters = s.filters.active();
+        if !filters.is_empty() {
+            parts.push(filters.join(", "));
         }
     }
     match s.audio_codec {
@@ -156,7 +166,14 @@ mod tests {
 
     fn job(name: &str) -> Job {
         let src = SourceInfo { path: PathBuf::from(format!("/in/{name}.mkv")), duration: Some(60.0), ..Default::default() };
-        Job { src, audio_sel: vec![], settings: EncodeSettings::default(), range: None, out: PathBuf::from(format!("/out/{name}.mp4")) }
+        Job {
+            src,
+            audio_sel: vec![],
+            sub_sel: vec![],
+            settings: EncodeSettings::default(),
+            range: None,
+            out: PathBuf::from(format!("/out/{name}.mp4")),
+        }
     }
 
     fn names(q: &Queue) -> Vec<String> {

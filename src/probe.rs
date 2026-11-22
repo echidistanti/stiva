@@ -40,6 +40,19 @@ pub struct SubTrack {
     pub default: bool,
 }
 
+impl SubTrack {
+    /// Whether the container can hold this kind of subtitles. Pictures of text (DVD, Blu-ray) cannot go in MP4,
+    /// and WebM takes only its own format, which a file of another kind never has.
+    pub fn fits(&self, container: crate::model::Container) -> bool {
+        use crate::model::Container;
+        match container {
+            Container::Mkv => true,
+            Container::Mp4 => matches!(self.codec.as_str(), "subrip" | "srt" | "ass" | "ssa" | "mov_text" | "webvtt" | "text"),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chapter {
     pub start: f64,

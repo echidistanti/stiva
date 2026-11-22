@@ -4,6 +4,7 @@ mod app;
 mod caps;
 mod deps;
 mod encode;
+mod filters;
 mod icon;
 mod model;
 mod presets;

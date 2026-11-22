@@ -1,6 +1,6 @@
 //! Which encoders this ffmpeg has. Read once after ffmpeg is found, so the menus can hide what is missing.
 
-use crate::model::VideoCodec;
+use crate::model::{Rate, VideoCodec};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
@@ -17,6 +17,9 @@ pub struct Capabilities {
     /// Encoders that passed a test encode in 10-bit, and those that did not with what ffmpeg said.
     ten_bit: HashSet<String>,
     ten_bit_rejected: Vec<(String, String)>,
+    /// Hardware encoders that took a test encode steered by a bitrate, and those that did not.
+    bitrate: HashSet<String>,
+    bitrate_rejected: Vec<(String, String)>,
 }
 
 /// Runs `works` for each codec, side by side, as failing ones take a moment.
@@ -35,6 +38,11 @@ impl Capabilities {
     /// True when a test encode in 10-bit worked with this encoder.
     pub fn has_ten_bit(&self, encoder: &str) -> bool {
         self.ten_bit.contains(encoder)
+    }
+
+    /// True when the encoder can be steered by a bitrate: the software ones always, a graphics chip once a test encode worked.
+    pub fn has_bitrate(&self, codec: VideoCodec) -> bool {
+        !codec.is_hardware() || self.bitrate.contains(codec.encoder())
     }
 
     /// Reads the list printed by `ffmpeg -encoders`: a header, a "------" line, then
@@ -82,6 +90,19 @@ impl Capabilities {
         }
     }
 
+    /// Finds out which graphics chips accept a bitrate: their options for it differ from one maker to the next.
+    fn find_bitrate(&mut self, works: impl Fn(VideoCodec) -> Result<(), String> + Sync) {
+        let listed: Vec<VideoCodec> = VideoCodec::ALL.into_iter().filter(|c| c.is_hardware() && self.has(c.encoder())).collect();
+        for (c, result) in run_tests(&listed, &works) {
+            match result {
+                Ok(()) => {
+                    self.bitrate.insert(c.encoder().to_string());
+                }
+                Err(why) => self.bitrate_rejected.push((c.encoder().to_string(), why)),
+            }
+        }
+    }
+
     /// Plain text on which encoders work here, in 8 and 10 bit, and why the others do not; kept in the logs
     /// folder so a missing option can be traced.
     pub fn report(&self) -> String {
@@ -104,6 +125,13 @@ impl Capabilities {
             } else if let Some((_, why)) = self.ten_bit_rejected.iter().find(|(n, _)| n == name) {
                 out += &format!("{name} 10-bit: not usable here: {why}\n");
             }
+            if c.is_hardware() {
+                if self.has_bitrate(c) {
+                    out += &format!("{name} bitrate: works\n");
+                } else if let Some((_, why)) = self.bitrate_rejected.iter().find(|(n, _)| n == name) {
+                    out += &format!("{name} bitrate: not usable here: {why}\n");
+                }
+            }
         }
         out
     }
@@ -124,18 +152,20 @@ impl Capabilities {
         if caps.encoders.is_empty() {
             return Err("ffmpeg did not list any encoder".into());
         }
-        caps.keep_working(|c| test_encode(ffmpeg, c, 8));
-        caps.find_ten_bit(|c| test_encode(ffmpeg, c, 10));
+        caps.keep_working(|c| test_encode(ffmpeg, c, 8, false));
+        caps.find_ten_bit(|c| test_encode(ffmpeg, c, 10, false));
+        caps.find_bitrate(|c| test_encode(ffmpeg, c, 8, true));
         Ok(caps)
     }
 }
 
 /// Encodes a few black frames with the encoder, using the options a real encode would use.
 /// The error is the first lines ffmpeg printed, which name the real cause.
-fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8) -> Result<(), String> {
+fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool) -> Result<(), String> {
+    let rate = if bitrate { Rate::Kbps(1000) } else { Rate::Quality(codec.default_crf()) };
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=25:d=0.5", "-frames:v", "8"]);
-    cmd.args(codec.args(codec.default_crf(), codec.default_preset(), bits));
+    cmd.args(codec.args(rate, codec.default_preset(), bits));
     cmd.args(["-f", "null", "-"]);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     crate::deps::quiet(&mut cmd);

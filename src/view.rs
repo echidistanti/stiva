@@ -2,7 +2,9 @@
 //! as `Action`s, which are carried out after the frame has been drawn.
 
 use crate::app::{self, App, Last, Page, QueueTab, Report, Run, Setup, Source, Src, Tab};
-use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, SIZE_STEPS};
+use crate::encode::Job;
+use crate::filters::{self, Crop, Deinterlace, Filters, Margins, Rotate, Strength};
+use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, RateMode, SIZE_STEPS};
 use crate::probe::{channel_name, human_bitrate, human_duration, human_size};
 use crate::queue::{self, State};
 use crate::settings::{DestMode, OnExists};
@@ -75,6 +77,32 @@ fn video_line(info: &crate::probe::SourceInfo) -> Option<String> {
         t.push_str(&format!(" {:.2} fps", v.fps).replace(".00 fps", " fps"));
     }
     Some(t)
+}
+
+fn sub_label(i: usize, t: &crate::probe::SubTrack) -> String {
+    let mut parts = vec![format!("Track {}", i + 1)];
+    if !t.lang.is_empty() {
+        parts.push(t.lang.clone());
+    }
+    if !t.title.is_empty() {
+        parts.push(t.title.clone());
+    }
+    parts.push(
+        match t.codec.as_str() {
+            "subrip" | "srt" => "SubRip",
+            "ass" | "ssa" => "ASS",
+            "mov_text" => "MP4 text",
+            "webvtt" => "WebVTT",
+            "hdmv_pgs_subtitle" => "Blu-ray picture",
+            "dvd_subtitle" => "DVD picture",
+            other => other,
+        }
+        .to_string(),
+    );
+    if t.forced {
+        parts.push("forced".into());
+    }
+    parts.join(" · ")
 }
 
 fn audio_label(i: usize, t: &crate::probe::AudioTrack) -> String {
@@ -254,6 +282,7 @@ impl App {
     }
 
     fn source_card(&mut self, ui: &mut egui::Ui, hovering: bool, actions: &mut Vec<Action>) {
+        let container = self.set.encode.container;
         let outline = if hovering { Stroke::new(1.5, ui::ACCENT) } else { Stroke::new(1.0, ui::LINE) };
         match &mut self.src {
             Src::Empty => ui::card(ui, ui::CARD, outline, |ui| {
@@ -285,7 +314,7 @@ impl App {
             }
             Src::Ready(src) => {
                 let mut close = false;
-                ui::card(ui, ui::CARD, outline, |ui| source_details(ui, src, &mut close));
+                ui::card(ui, ui::CARD, outline, |ui| source_details(ui, src, container, &mut close));
                 if close {
                     actions.push(Action::CloseSource);
                 }
@@ -355,12 +384,27 @@ impl App {
         let caps = self.caps.clone();
         let has = |enc: &str| caps.as_ref().is_none_or(|c| c.has(enc));
         let before = self.set.encode.clone();
+        // The bitrate a target size comes to for the file in the window, so the choice can be judged.
+        let target_hint = match &self.src {
+            Src::Ready(src) if self.set.encode.rate == RateMode::TargetSize => {
+                let job = Job {
+                    src: src.info.clone(),
+                    audio_sel: src.audio_selection(),
+                    settings: self.set.encode.clone(),
+                    range: src.range().ok().flatten(),
+                    ..Default::default()
+                };
+                Some(job.target_kbps())
+            }
+            _ => None,
+        };
         ui::card(ui, ui::CARD, Stroke::new(1.0, ui::LINE), |ui| {
             self.preset_row(ui, actions);
             ui.horizontal(|ui| {
                 for (tab, name) in [
                     (Tab::Container, s::TAB_CONTAINER),
                     (Tab::Sizing, s::TAB_SIZING),
+                    (Tab::Filters, s::TAB_FILTERS),
                     (Tab::Video, s::TAB_VIDEO),
                     (Tab::Audio, s::TAB_AUDIO),
                 ] {
@@ -414,6 +458,13 @@ impl App {
                         }
                     }
                 }
+                Tab::Filters => {
+                    if enc.container.audio_only() {
+                        ui.label(muted(s::NO_VIDEO_HERE));
+                    } else {
+                        filters_tab(ui, &mut enc.filters);
+                    }
+                }
                 Tab::Video => {
                     if enc.container.audio_only() {
                         ui.label(muted(s::NO_VIDEO_HERE));
@@ -449,11 +500,51 @@ impl App {
                                 ui.label(muted(why));
                             }
                         });
-                        setting_row(ui, s::VIDEO_QUALITY, |ui| {
-                            let (lo, hi) = enc.video_codec.crf_range();
-                            ui.add(egui::Slider::new(&mut enc.crf, lo..=hi));
-                            ui.label(muted(if enc.video_codec.is_hardware() { s::VIDEO_QUALITY_HINT_HW } else { s::VIDEO_QUALITY_HINT }));
+                        let bitrate_ok = caps.as_ref().is_none_or(|c| c.has_bitrate(enc.video_codec));
+                        setting_row(ui, s::RATE_MODE, |ui| {
+                            egui::ComboBox::from_id_salt("rate").selected_text(enc.rate.label()).width(190.0).show_ui(ui, |ui| {
+                                for m in RateMode::ALL {
+                                    ui.add_enabled_ui(m == RateMode::Quality || bitrate_ok, |ui| {
+                                        ui.selectable_value(&mut enc.rate, m, m.label())
+                                    });
+                                }
+                            });
+                            if !bitrate_ok {
+                                ui.label(muted(s::RATE_NEEDS_CHIP_TEST));
+                            }
                         });
+                        match enc.rate {
+                            RateMode::Quality => setting_row(ui, s::RATE_QUALITY, |ui| {
+                                let (lo, hi) = enc.video_codec.crf_range();
+                                ui.add(egui::Slider::new(&mut enc.crf, lo..=hi));
+                                ui.label(muted(if enc.video_codec.is_hardware() {
+                                    s::VIDEO_QUALITY_HINT_HW
+                                } else {
+                                    s::VIDEO_QUALITY_HINT
+                                }));
+                            }),
+                            RateMode::Bitrate => setting_row(ui, s::RATE_BITRATE, |ui| {
+                                ui.add(egui::DragValue::new(&mut enc.video_kbps).range(50..=200_000).speed(20.0).suffix(" kb/s"));
+                                ui.label(muted(s::RATE_BITRATE_HINT));
+                            }),
+                            RateMode::TargetSize => setting_row(ui, s::RATE_SIZE, |ui| {
+                                ui.add(egui::DragValue::new(&mut enc.target_mb).range(1..=200_000).speed(5.0).suffix(" MB"));
+                                ui.label(muted(s::RATE_SIZE_HINT));
+                                match &target_hint {
+                                    Some(Ok(k)) => ui.label(muted(format!(
+                                        "That is about {} for the video of this file.",
+                                        human_bitrate(u64::from(*k) * 1000)
+                                    ))),
+                                    Some(Err(e)) => ui.label(RichText::new(e.clone()).size(13.0).color(ui::WARN)),
+                                    None => ui.label(muted(s::RATE_SIZE_NEEDS_FILE)),
+                                };
+                            }),
+                        }
+                        if enc.rate != RateMode::Quality && enc.video_codec.can_two_pass() {
+                            setting_row(ui, s::TWO_PASS, |ui| {
+                                ui.checkbox(&mut enc.two_pass, s::TWO_PASS_HINT);
+                            });
+                        }
                         setting_row(ui, s::VIDEO_SPEED, |ui| {
                             egui::ComboBox::from_id_salt("preset").selected_text(enc.preset.clone()).width(190.0).show_ui(ui, |ui| {
                                 for p in enc.video_codec.presets() {
@@ -568,6 +659,9 @@ impl App {
             ui.add_space(2.0);
             let mut parts = vec![];
             if let Some(p) = &run.progress {
+                if p.passes > 1 {
+                    parts.push(format!("pass {} of {}", p.pass, p.passes));
+                }
                 if let Some(f) = frac {
                     parts.push(format!("{}%", (f * 100.0).floor() as u32));
                 }
@@ -802,6 +896,9 @@ impl App {
                     ui.add_space(4.0);
                     ui::bar(ui, frac, ui::ACCENT);
                     let mut parts = vec![];
+                    if let Some(p) = run.progress.filter(|p| p.passes > 1) {
+                        parts.push(format!("pass {} of {}", p.pass, p.passes));
+                    }
                     if let Some(f) = frac {
                         parts.push(format!("{}%", (f * 100.0).floor() as u32));
                     }
@@ -1003,7 +1100,94 @@ impl App {
     }
 }
 
-fn source_details(ui: &mut egui::Ui, src: &mut Source, close: &mut bool) {
+fn filters_tab(ui: &mut egui::Ui, f: &mut Filters) {
+    setting_row(ui, s::FILTER_CROP, |ui| {
+        let shown = match f.crop {
+            Crop::None => s::FILTER_CROP_NONE,
+            Crop::Auto => s::FILTER_CROP_AUTO,
+            Crop::Manual(_) => s::FILTER_CROP_MANUAL,
+        };
+        egui::ComboBox::from_id_salt("crop").selected_text(shown).width(250.0).show_ui(ui, |ui| {
+            ui.selectable_value(&mut f.crop, Crop::None, s::FILTER_CROP_NONE);
+            ui.selectable_value(&mut f.crop, Crop::Auto, s::FILTER_CROP_AUTO);
+            let manual = Crop::Manual(if let Crop::Manual(m) = f.crop { m } else { Margins::default() });
+            if ui.selectable_label(matches!(f.crop, Crop::Manual(_)), s::FILTER_CROP_MANUAL).clicked() {
+                f.crop = manual;
+            }
+        });
+        match &mut f.crop {
+            Crop::None => {}
+            Crop::Auto => {
+                ui.label(muted(s::FILTER_CROP_AUTO_HINT));
+            }
+            Crop::Manual(m) => {
+                ui.horizontal(|ui| {
+                    for (name, v) in [
+                        (s::FILTER_LEFT, &mut m.left),
+                        (s::FILTER_TOP, &mut m.top),
+                        (s::FILTER_RIGHT, &mut m.right),
+                        (s::FILTER_BOTTOM, &mut m.bottom),
+                    ] {
+                        ui.label(muted(name));
+                        ui.add(egui::DragValue::new(v).range(0..=filters::MAX_MARGIN).suffix(" px"));
+                    }
+                });
+                ui.label(muted(s::FILTER_CROP_MANUAL_HINT));
+            }
+        }
+    });
+    setting_row(ui, s::FILTER_ROTATE, |ui| {
+        egui::ComboBox::from_id_salt("rotate").selected_text(f.rotate.label()).width(250.0).show_ui(ui, |ui| {
+            for r in Rotate::ALL {
+                ui.selectable_value(&mut f.rotate, r, r.label());
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut f.flip_h, s::FILTER_FLIP_H);
+            ui.checkbox(&mut f.flip_v, s::FILTER_FLIP_V);
+        });
+    });
+    setting_row(ui, s::FILTER_DEINTERLACE, |ui| {
+        egui::ComboBox::from_id_salt("deint").selected_text(f.deinterlace.label()).width(250.0).show_ui(ui, |ui| {
+            for d in Deinterlace::ALL {
+                ui.selectable_value(&mut f.deinterlace, d, d.label());
+            }
+        });
+        ui.label(muted(s::FILTER_DEINTERLACE_HINT));
+    });
+    setting_row(ui, s::FILTER_DETELECINE, |ui| {
+        ui.checkbox(&mut f.detelecine, s::FILTER_DETELECINE_ON);
+        ui.label(muted(s::FILTER_DETELECINE_HINT));
+    });
+    setting_row(ui, s::FILTER_DENOISE, |ui| {
+        egui::ComboBox::from_id_salt("denoise").selected_text(f.denoise.label()).width(250.0).show_ui(ui, |ui| {
+            for d in Strength::ALL {
+                ui.selectable_value(&mut f.denoise, d, d.label());
+            }
+        });
+        ui.label(muted(s::FILTER_DENOISE_HINT));
+    });
+    setting_row(ui, s::FILTER_SHARPEN, |ui| {
+        egui::ComboBox::from_id_salt("sharpen").selected_text(f.sharpen.label()).width(250.0).show_ui(ui, |ui| {
+            for d in Strength::ALL {
+                ui.selectable_value(&mut f.sharpen, d, d.label());
+            }
+        });
+    });
+    setting_row(ui, s::FILTER_GRAYSCALE, |ui| {
+        ui.checkbox(&mut f.grayscale, "");
+    });
+    setting_row(ui, s::FILTER_CUSTOM, |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut f.custom).hint_text("eq=brightness=0.05").desired_width(330.0).margin(Margin::symmetric(10, 6)),
+        );
+        ui.label(muted(s::FILTER_CUSTOM_HINT));
+    });
+    ui.add_space(4.0);
+    ui.label(muted(s::FILTER_ORDER_NOTE));
+}
+
+fn source_details(ui: &mut egui::Ui, src: &mut Source, container: Container, close: &mut bool) {
     let info = &src.info;
     let name = info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     ui.horizontal(|ui| {
@@ -1045,9 +1229,22 @@ fn source_details(ui: &mut egui::Ui, src: &mut Source, close: &mut bool) {
         ui.checkbox(&mut src.audio_on[i], audio_label(i, t));
     }
     if !info.subs.is_empty() {
-        ui.add_space(4.0);
-        let n = info.subs.len();
-        ui.label(muted(format!("{n} subtitle {}. {}", if n == 1 { "track" } else { "tracks" }, s::SUBTITLES_NOT_YET)));
+        ui.add_space(6.0);
+        ui.label(RichText::new(s::SUBTITLE_TRACKS).size(14.0).strong());
+        if container.audio_only() || container == Container::WebM {
+            ui.label(muted(s::SUBTITLE_NONE_HERE));
+        } else {
+            let mut some_do_not_fit = false;
+            for (i, t) in info.subs.iter().enumerate() {
+                let fits = t.fits(container);
+                some_do_not_fit |= !fits;
+                let label = if fits { sub_label(i, t) } else { format!("{} ({})", sub_label(i, t), s::SUBTITLE_PICTURES) };
+                ui.add_enabled(fits, egui::Checkbox::new(&mut src.subs_on[i], label));
+            }
+            if some_do_not_fit {
+                ui.label(muted(s::SUBTITLE_HINT_MP4));
+            }
+        }
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {

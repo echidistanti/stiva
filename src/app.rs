@@ -45,14 +45,16 @@ pub enum Setup {
 pub struct Source {
     pub info: SourceInfo,
     pub audio_on: Vec<bool>,
+    /// Which subtitle tracks to keep; those the container cannot hold are left out when the job is made.
+    pub subs_on: Vec<bool>,
     pub start: String,
     pub end: String,
 }
 
 impl Source {
     fn new(info: SourceInfo) -> Source {
-        let n = info.audio.len();
-        Source { info, audio_on: vec![true; n], start: String::new(), end: String::new() }
+        let (n, m) = (info.audio.len(), info.subs.len());
+        Source { info, audio_on: vec![true; n], subs_on: vec![true; m], start: String::new(), end: String::new() }
     }
 
     /// The part of the file to encode, from the two text boxes.
@@ -70,6 +72,10 @@ impl Source {
 
     pub fn audio_selection(&self) -> Vec<usize> {
         self.audio_on.iter().enumerate().filter(|(_, on)| **on).map(|(i, _)| i).collect()
+    }
+
+    pub fn subtitle_selection(&self) -> Vec<usize> {
+        self.subs_on.iter().enumerate().filter(|(_, on)| **on).map(|(i, _)| i).collect()
     }
 }
 
@@ -97,6 +103,7 @@ pub enum QueueTab {
 pub enum Tab {
     Container,
     Sizing,
+    Filters,
     Video,
     Audio,
 }
@@ -222,6 +229,7 @@ impl App {
                 (true, Ok("audio")) => Tab::Audio,
                 (true, Ok("container")) => Tab::Container,
                 (true, Ok("sizing")) => Tab::Sizing,
+                (true, Ok("filters")) => Tab::Filters,
                 _ => Tab::Video,
             },
             page: Page::Editor,
@@ -308,6 +316,11 @@ impl App {
                     }
                     if enc.bit_depth == 10 && !c.has_ten_bit(enc.video_codec.encoder()) {
                         enc.bit_depth = 8;
+                        self.dirty = true;
+                    }
+                    if enc.rate != crate::model::RateMode::Quality && !c.has_bitrate(enc.video_codec) {
+                        enc.rate = crate::model::RateMode::Quality;
+                        enc.normalize();
                         self.dirty = true;
                     }
                     // Which encoders passed their test, in 8 and 10 bit, and why the others did not.
@@ -460,8 +473,8 @@ impl App {
     fn batch_arrived(&mut self, path: PathBuf, res: Result<SourceInfo, String>, settings: EncodeSettings) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let job = res.and_then(|info| {
-            let audio_sel = (0..info.audio.len()).collect();
-            self.job_for(&info, audio_sel, None, &settings)
+            let (audio_sel, sub_sel) = ((0..info.audio.len()).collect(), (0..info.subs.len()).collect());
+            self.job_for(&info, audio_sel, sub_sel, None, &settings)
         });
         match job {
             Ok(job) => {
@@ -485,6 +498,9 @@ impl App {
             if st.bit_depth >= 10 && !c.has_ten_bit(enc) {
                 return Some(format!("10-bit does not work with {label} on this PC. Choose 8-bit or another codec."));
             }
+            if st.rate != crate::model::RateMode::Quality && !c.has_bitrate(st.video_codec) {
+                return Some(format!("{label} cannot aim for a bitrate or a size on this PC. Use constant quality or another codec."));
+            }
         }
         match st.audio_codec.encoder() {
             Some(enc) if !c.has(enc) => Some(format!("{} is not available here. Pick another audio codec.", st.audio_codec.label())),
@@ -493,12 +509,19 @@ impl App {
     }
 
     /// A job for `info` with the given choices, or the reason there can be none.
-    fn job_for(&self, info: &SourceInfo, audio_sel: Vec<usize>, range: Option<(f64, f64)>, st: &EncodeSettings) -> Result<Job, String> {
+    fn job_for(
+        &self,
+        info: &SourceInfo,
+        audio_sel: Vec<usize>,
+        sub_sel: Vec<usize>,
+        range: Option<(f64, f64)>,
+        st: &EncodeSettings,
+    ) -> Result<Job, String> {
         if let Some(why) = self.unsupported(st) {
             return Err(why);
         }
         let out = self.set.output_path_for(&info.path, st.container);
-        let job = Job { src: info.clone(), audio_sel, settings: st.clone(), range, out };
+        let job = Job { src: info.clone(), audio_sel, sub_sel, settings: st.clone(), range, out };
         job.validate()?;
         Ok(job)
     }
@@ -507,7 +530,10 @@ impl App {
     pub fn add_current(&mut self) -> bool {
         let Src::Ready(src) = &self.src else { return false };
         let name = src.info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let job = src.range().map_err(str::to_string).and_then(|r| self.job_for(&src.info, src.audio_selection(), r, &self.set.encode));
+        let job = src
+            .range()
+            .map_err(str::to_string)
+            .and_then(|r| self.job_for(&src.info, src.audio_selection(), src.subtitle_selection(), r, &self.set.encode));
         match job {
             Ok(job) => {
                 self.queue.add(job);

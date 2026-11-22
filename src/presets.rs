@@ -178,7 +178,7 @@ mod tests {
         for p in &all {
             let mut again = p.settings.clone();
             assert!(!again.normalize() && again == p.settings, "{} needs fixing by normalize", p.name);
-            let args = p.settings.video_codec.args(p.settings.crf, &p.settings.preset, p.settings.bit_depth);
+            let args = p.settings.video_codec.args(crate::model::Rate::Quality(p.settings.crf), &p.settings.preset, p.settings.bit_depth);
             assert!(args.len() > 4, "{}", p.name);
         }
     }

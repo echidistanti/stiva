@@ -1,7 +1,8 @@
 //! Turns the user's choices into an ffmpeg command line, runs it, and reports progress.
 //! ffmpeg writes to `name.ext.part`; the file takes its real name only when the run ends well.
 
-use crate::model::{AudioCodec, Container, EncodeSettings};
+use crate::filters::Crop;
+use crate::model::{AudioCodec, Container, EncodeSettings, Rate, RateMode};
 use crate::probe::SourceInfo;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -12,11 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Job {
     pub src: SourceInfo,
     /// Which audio tracks to keep, as positions in `src.audio`.
     pub audio_sel: Vec<usize>,
+    /// Which subtitle tracks to keep, as positions in `src.subs`.
+    #[serde(default)]
+    pub sub_sel: Vec<usize>,
     pub settings: EncodeSettings,
     /// Start and end in seconds, when only a part of the file is wanted.
     pub range: Option<(f64, f64)>,
@@ -38,6 +42,56 @@ impl Job {
         }
     }
 
+    /// The audio tracks that go into the file, as positions in `src.audio`.
+    fn kept_audio(&self) -> Vec<usize> {
+        if self.settings.audio_codec == AudioCodec::None {
+            vec![]
+        } else {
+            self.audio_sel.iter().copied().filter(|&p| p < self.src.audio.len()).collect()
+        }
+    }
+
+    /// The subtitle tracks that go into the file: only those the container can hold.
+    fn kept_subs(&self) -> Vec<usize> {
+        let c = self.settings.container;
+        if c.audio_only() || self.src.video.is_none() {
+            return vec![];
+        }
+        self.sub_sel.iter().copied().filter(|&p| self.src.subs.get(p).is_some_and(|t| t.fits(c))).collect()
+    }
+
+    /// Kilobits a second all the kept audio takes, as far as it can be told before the encode.
+    fn audio_kbps_total(&self) -> u32 {
+        let st = &self.settings;
+        self.kept_audio()
+            .iter()
+            .map(|&p| match st.audio_codec {
+                c if c.has_bitrate() => st.audio_kbps,
+                AudioCodec::Flac => self.src.audio[p].bit_rate.map_or(800, |b| (b / 1000) as u32),
+                _ => self.src.audio[p].bit_rate.map_or(192, |b| (b / 1000) as u32),
+            })
+            .sum()
+    }
+
+    /// The video bitrate that brings the file to the wanted size: the size spread over the length, minus the
+    /// audio and a little for the container.
+    pub fn target_kbps(&self) -> Result<u32, String> {
+        let secs =
+            self.span().filter(|s| *s > 0.0).ok_or("The length of this file is not known, so a size cannot be aimed at. Use a bitrate.")?;
+        let total_kbps = f64::from(self.settings.target_mb) * 8192.0 * 0.97 / secs;
+        let video = total_kbps - f64::from(self.audio_kbps_total());
+        if video < 50.0 {
+            return Err("The size is too small for this length with the audio it has. Raise the size or lower the audio bitrate.".into());
+        }
+        Ok(video.min(200_000.0) as u32)
+    }
+
+    /// How the video is steered for this job.
+    pub fn video_rate(&self) -> Result<Rate, String> {
+        let target = (self.settings.rate == RateMode::TargetSize).then(|| self.target_kbps()).transpose()?;
+        Ok(self.settings.rate_with(target))
+    }
+
     /// The reasons this job cannot run, in words for the user.
     pub fn validate(&self) -> Result<(), String> {
         let st = &self.settings;
@@ -53,6 +107,9 @@ impl Job {
             return Err("This file has no video: pick an audio-only format.".into());
         } else if wants_audio && !self.src.audio.is_empty() && self.audio_sel.is_empty() {
             return Err("Choose at least one audio track, or set the audio to \"No audio\".".into());
+        }
+        if !st.container.audio_only() && self.src.video.is_some() {
+            self.video_rate()?;
         }
         if let Some((a, b)) = self.range {
             if !(a >= 0.0 && b > a) {
@@ -80,9 +137,24 @@ fn secs(v: f64) -> String {
     format!("{v:.3}")
 }
 
-/// The arguments of the ffmpeg run, without the program name.
+/// Which run over the file the arguments are for. With two passes the first only studies the picture, and
+/// both name the same statistics file.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pass<'a> {
+    Single,
+    First(&'a str),
+    Second(&'a str),
+}
+
+/// The arguments of a single-pass run, without the program name.
+#[cfg(test)]
 pub fn build_args(job: &Job) -> Vec<OsString> {
+    args_for(job, Pass::Single)
+}
+
+fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
     let st = &job.settings;
+    let first = matches!(pass, Pass::First(_));
     let mut a: Vec<OsString> = Vec::new();
     let mut o = |items: &[&str]| a.extend(items.iter().map(OsString::from));
 
@@ -102,11 +174,8 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
 
     let audio_only = st.container.audio_only();
     let video = !audio_only && job.src.video.is_some();
-    let keep: Vec<usize> = if st.audio_codec == AudioCodec::None {
-        vec![]
-    } else {
-        job.audio_sel.iter().copied().filter(|&p| p < job.src.audio.len()).collect()
-    };
+    let keep = if first { vec![] } else { job.kept_audio() };
+    let subs = if first { vec![] } else { job.kept_subs() };
 
     if video {
         o(&["-map", "0:v:0"]);
@@ -114,15 +183,28 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
     for pos in &keep {
         o(&["-map", &format!("0:a:{pos}")]);
     }
-    o(&["-map_metadata", "0"]);
-    o(&["-map_chapters", if audio_only { "-1" } else { "0" }]);
+    for pos in &subs {
+        o(&["-map", &format!("0:s:{pos}")]);
+    }
+    if first {
+        o(&["-an", "-sn"]);
+    } else {
+        o(&["-map_metadata", "0"]);
+        o(&["-map_chapters", if audio_only { "-1" } else { "0" }]);
+    }
 
     if video {
         let codec = st.video_codec;
-        if let Some(size) = st.max_size {
-            o(&["-vf", &scale_filter(size)]);
+        if let Some(chain) = st.filters.chain(st.max_size.map(scale_filter)) {
+            o(&["-vf", &chain]);
         }
-        let mut args = codec.args(st.crf, &st.preset, st.bit_depth);
+        let rate = job.video_rate().unwrap_or(Rate::Quality(st.crf));
+        let mut args = codec.args(rate, &st.preset, st.bit_depth);
+        match pass {
+            Pass::Single => {}
+            Pass::First(log) => args.extend(["-pass".to_string(), "1".to_string(), "-passlogfile".to_string(), log.to_string()]),
+            Pass::Second(log) => args.extend(["-pass".to_string(), "2".to_string(), "-passlogfile".to_string(), log.to_string()]),
+        }
         if codec.is_hevc() && st.container == Container::Mp4 {
             // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
             args.extend(["-tag:v".to_string(), "hvc1".to_string()]);
@@ -130,37 +212,44 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
         o(&args.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
-    match st.audio_codec {
-        AudioCodec::None => o(&["-an"]),
-        AudioCodec::Copy => o(&["-c:a", "copy"]),
-        codec => {
-            if let Some(enc) = codec.encoder() {
-                o(&["-c:a", enc]);
-            }
-            if codec.has_bitrate() {
-                o(&["-b:a", &format!("{}k", st.audio_kbps)]);
-            }
-            // Never more channels than the track has: a stereo track is not stretched to 5.1.
-            if let Some(n) = st.mixdown.channels() {
-                for (k, pos) in keep.iter().enumerate() {
-                    if job.src.audio[*pos].channels > n {
-                        o(&[&format!("-ac:a:{k}"), &n.to_string()]);
+    if !first {
+        match st.audio_codec {
+            AudioCodec::None => o(&["-an"]),
+            AudioCodec::Copy => o(&["-c:a", "copy"]),
+            codec => {
+                if let Some(enc) = codec.encoder() {
+                    o(&["-c:a", enc]);
+                }
+                if codec.has_bitrate() {
+                    o(&["-b:a", &format!("{}k", st.audio_kbps)]);
+                }
+                // Never more channels than the track has: a stereo track is not stretched to 5.1.
+                if let Some(n) = st.mixdown.channels() {
+                    for (k, pos) in keep.iter().enumerate() {
+                        if job.src.audio[*pos].channels > n {
+                            o(&[&format!("-ac:a:{k}"), &n.to_string()]);
+                        }
                     }
                 }
-            }
-            if st.gain_db.abs() > 0.001 {
-                o(&["-af", &format!("volume={}dB", st.gain_db)]);
+                if st.gain_db.abs() > 0.001 {
+                    o(&["-af", &format!("volume={}dB", st.gain_db)]);
+                }
             }
         }
+        if !subs.is_empty() {
+            // MP4 holds only its own kind of text subtitles; MKV takes them as they are.
+            o(&["-c:s", if st.container == Container::Mp4 { "mov_text" } else { "copy" }]);
+        }
+        if matches!(st.container, Container::Mp4 | Container::M4a) {
+            o(&["-movflags", "+faststart"]);
+        }
+        o(&["-f", st.container.muxer()]);
+    } else {
+        o(&["-f", "null"]);
     }
-
-    if matches!(st.container, Container::Mp4 | Container::M4a) {
-        o(&["-movflags", "+faststart"]);
-    }
-    o(&["-f", st.container.muxer()]);
     o(&["-progress", "pipe:1", "-stats_period", "0.5"]);
     drop(o);
-    a.push(job.part_path().into_os_string());
+    a.push(if first { OsString::from("-") } else { job.part_path().into_os_string() });
     a
 }
 
@@ -184,18 +273,24 @@ pub struct Progress {
     pub kbps: f32,
     pub frame: u64,
     pub ended: bool,
+    /// Which run over the file this is, of how many; both 0 until a run says so.
+    pub pass: u8,
+    pub passes: u8,
 }
 
 impl Progress {
-    /// 0..=1, or None when the length is not known.
+    /// 0..=1 of the whole job, or None when the length is not known. With two passes each is half of it.
     pub fn fraction(&self, span: Option<f64>) -> Option<f32> {
-        span.filter(|s| *s > 0.0).map(|s| ((self.out_secs / s) as f32).clamp(0.0, 1.0))
+        let passes = f32::from(self.passes.max(1));
+        let done = f32::from(self.pass.max(1) - 1);
+        span.filter(|s| *s > 0.0).map(|s| ((done + ((self.out_secs / s) as f32).clamp(0.0, 1.0)) / passes).clamp(0.0, 1.0))
     }
 
     /// Seconds left at the current speed.
     pub fn eta(&self, span: Option<f64>) -> Option<f64> {
         let s = span?;
-        (self.speed > 0.01 && self.out_secs > 0.0).then(|| ((s - self.out_secs) / self.speed as f64).max(0.0))
+        let later = f64::from(self.passes.max(1) - self.pass.max(1)) * s;
+        (self.speed > 0.01 && self.out_secs > 0.0).then(|| ((s - self.out_secs + later) / self.speed as f64).max(0.0))
     }
 }
 
@@ -322,6 +417,97 @@ impl Handle {
     }
 }
 
+/// A folder for the statistics of a two-pass encode, removed when it goes out of scope.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> std::io::Result<Scratch> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("stiva-pass-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Scratch(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// How one run of ffmpeg ended.
+struct Ended {
+    success: bool,
+    code: Option<i32>,
+    /// The last lines ffmpeg said, which explain a failure.
+    tail: Vec<String>,
+}
+
+/// Runs ffmpeg once, passing its progress and its words on through `emit`, and waits for it to end.
+fn run_ffmpeg<E: Fn(Event) + Send + Sync + 'static>(
+    ffmpeg: &Path,
+    args: &[OsString],
+    cwd: Option<&Path>,
+    pass: (u8, u8),
+    child: &Arc<Mutex<Option<Child>>>,
+    cancelled: &AtomicBool,
+    emit: &Arc<E>,
+) -> Result<Ended, String> {
+    emit(Event::Log(command_line(ffmpeg, args)));
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    crate::deps::quiet(&mut cmd);
+    let mut proc = cmd.spawn().map_err(|e| format!("ffmpeg could not start: {e}"))?;
+    let stdout = proc.stdout.take();
+    let stderr = proc.stderr.take();
+    *child.lock().unwrap() = Some(proc);
+    // A stop that came while this run was starting found no process to end: end it now.
+    if cancelled.load(Ordering::SeqCst) {
+        if let Some(c) = child.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
+    }
+
+    // ffmpeg's own messages: kept for the log, and the last ones explain a failure.
+    let err_emit = emit.clone();
+    let err_thread = std::thread::spawn(move || {
+        let mut tail: Vec<String> = Vec::new();
+        if let Some(e) = stderr {
+            for raw in BufReader::new(e).split(b'\n').map_while(Result::ok) {
+                let line = String::from_utf8_lossy(&raw).trim_end().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                tail.push(line.clone());
+                if tail.len() > 14 {
+                    tail.remove(0);
+                }
+                err_emit(Event::Log(line));
+            }
+        }
+        tail
+    });
+
+    let mut parser = ProgressParser::default();
+    if let Some(o) = stdout {
+        for raw in BufReader::new(o).split(b'\n').map_while(Result::ok) {
+            if let Some(mut p) = parser.feed(&String::from_utf8_lossy(&raw)) {
+                (p.pass, p.passes) = pass;
+                emit(Event::Progress(p));
+            }
+        }
+    }
+    let tail = err_thread.join().unwrap_or_default();
+    let status = child.lock().unwrap().as_mut().map(|c| c.wait());
+    match status {
+        Some(Ok(s)) => Ok(Ended { success: s.success(), code: s.code(), tail }),
+        _ => Err("ffmpeg ended in an unknown way".into()),
+    }
+}
+
 /// Starts the run on its own thread. Everything it has to say comes through `emit`.
 pub fn start(job: Job, ffmpeg: PathBuf, emit: impl Fn(Event) + Send + Sync + 'static) -> Handle {
     let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
@@ -330,63 +516,74 @@ pub fn start(job: Job, ffmpeg: PathBuf, emit: impl Fn(Event) + Send + Sync + 'st
     let emit = Arc::new(emit);
     std::thread::spawn(move || {
         let failed = |msg: String| emit(Event::Done(Outcome::Failed { code: None, tail: vec![msg] }));
+        let mut job = job;
+        // The statistics folder of a two-pass run is worked in, so absolute paths keep the files findable.
+        job.src.path = std::path::absolute(&job.src.path).unwrap_or(job.src.path);
+        job.out = std::path::absolute(&job.out).unwrap_or(job.out);
         let part = job.part_path();
         if let Some(dir) = part.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 return failed(format!("Cannot create the folder {}: {e}", dir.display()));
             }
         }
-        let args = build_args(&job);
-        emit(Event::Log(command_line(&ffmpeg, &args)));
-        let mut cmd = Command::new(&ffmpeg);
-        cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        crate::deps::quiet(&mut cmd);
-        let mut proc = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return failed(format!("ffmpeg could not start: {e}")),
-        };
-        let stdout = proc.stdout.take();
-        let stderr = proc.stderr.take();
-        *child.lock().unwrap() = Some(proc);
         let started = Instant::now();
 
-        // ffmpeg's own messages: kept for the log, and the last ones explain a failure.
-        let err_emit = emit.clone();
-        let err_thread = std::thread::spawn(move || {
-            let mut tail: Vec<String> = Vec::new();
-            if let Some(e) = stderr {
-                for raw in BufReader::new(e).split(b'\n').map_while(Result::ok) {
-                    let line = String::from_utf8_lossy(&raw).trim_end().to_string();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    tail.push(line.clone());
-                    if tail.len() > 14 {
-                        tail.remove(0);
-                    }
-                    err_emit(Event::Log(line));
-                }
-            }
-            tail
-        });
+        let video = !job.settings.container.audio_only() && job.src.video.is_some();
+        if video && job.settings.filters.crop == Crop::Auto {
+            emit(Event::Log("Looking for black bars...".into()));
+            let frame = job.src.video.as_ref().map_or((0, 0), |v| (v.width, v.height));
+            let found = crate::filters::find_black_bars(&ffmpeg, &job.src.path, job.src.duration, frame);
+            emit(Event::Log(match found {
+                Some(m) => format!("Black bars found: cutting {} left, {} top, {} right, {} bottom.", m.left, m.top, m.right, m.bottom),
+                None => "No black bars found, the picture is left whole.".into(),
+            }));
+            job.settings.filters = job.settings.filters.with_crop_found(found);
+        }
 
-        let mut parser = ProgressParser::default();
-        if let Some(o) = stdout {
-            for raw in BufReader::new(o).split(b'\n').map_while(Result::ok) {
-                if let Some(p) = parser.feed(&String::from_utf8_lossy(&raw)) {
-                    emit(Event::Progress(p));
+        let two = video && job.settings.two_pass && job.settings.rate != RateMode::Quality && job.settings.video_codec.can_two_pass();
+        let scratch = if two {
+            match Scratch::new() {
+                Ok(s) => Some(s),
+                Err(e) => return failed(format!("Cannot make a temporary folder for the two passes: {e}")),
+            }
+        } else {
+            None
+        };
+        let log = "stiva2pass";
+        let runs: Vec<(Pass, Option<&Path>)> = match &scratch {
+            Some(s) => vec![(Pass::First(log), Some(s.0.as_path())), (Pass::Second(log), Some(s.0.as_path()))],
+            None => vec![(Pass::Single, None)],
+        };
+        let total = runs.len() as u8;
+
+        let mut last = None;
+        for (n, (pass, cwd)) in runs.into_iter().enumerate() {
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            if total > 1 {
+                emit(Event::Log(format!("--- pass {} of {total} ---", n + 1)));
+            }
+            let ended = match run_ffmpeg(&ffmpeg, &args_for(&job, pass), cwd, (n as u8 + 1, total), &child, &cancelled, &emit) {
+                Ok(e) => e,
+                Err(msg) => {
+                    let _ = std::fs::remove_file(&part);
+                    return failed(msg);
                 }
+            };
+            let ok = ended.success;
+            last = Some(ended);
+            if !ok {
+                break;
             }
         }
-        let tail = err_thread.join().unwrap_or_default();
-        let status = child.lock().unwrap().as_mut().map(|c| c.wait());
 
         if cancelled.load(Ordering::SeqCst) {
             let _ = std::fs::remove_file(&part);
             return emit(Event::Done(Outcome::Cancelled));
         }
-        match status {
-            Some(Ok(s)) if s.success() => match std::fs::rename(&part, &job.out) {
+        match last {
+            Some(e) if e.success => match std::fs::rename(&part, &job.out) {
                 Ok(()) => {
                     let bytes = std::fs::metadata(&job.out).map(|m| m.len()).unwrap_or(0);
                     emit(Event::Done(Outcome::Finished { out: job.out.clone(), bytes, elapsed: started.elapsed() }));
@@ -396,13 +593,13 @@ pub fn start(job: Job, ffmpeg: PathBuf, emit: impl Fn(Event) + Send + Sync + 'st
                     failed(format!("The file was encoded but could not be named {}: {e}", job.out.display()));
                 }
             },
-            Some(Ok(s)) => {
+            Some(e) => {
                 let _ = std::fs::remove_file(&part);
-                emit(Event::Done(Outcome::Failed { code: s.code(), tail }));
+                emit(Event::Done(Outcome::Failed { code: e.code, tail: e.tail }));
             }
-            _ => {
+            None => {
                 let _ = std::fs::remove_file(&part);
-                failed("ffmpeg ended in an unknown way".into());
+                failed("ffmpeg did not run".into());
             }
         }
     });
@@ -429,7 +626,7 @@ mod tests {
     }
 
     fn job(settings: EncodeSettings) -> Job {
-        Job { src: source(), audio_sel: vec![0, 1], settings, range: None, out: PathBuf::from("/out/film.mp4") }
+        Job { src: source(), audio_sel: vec![0, 1], sub_sel: vec![], settings, range: None, out: PathBuf::from("/out/film.mp4") }
     }
 
     fn line(j: &Job) -> String {
@@ -644,7 +841,7 @@ mod tests {
             s.preset = vc.presets()[vc.presets().len() - 1].to_string(); // the fastest, to keep the test short
             s.normalize();
             let out = dir.join(format!("{name}.{}", container.ext()));
-            let job = Job { src: src.clone(), audio_sel: vec![0, 1], settings: s, range: None, out: out.clone() };
+            let job = Job { src: src.clone(), audio_sel: vec![0, 1], sub_sel: vec![], settings: s, range: None, out: out.clone() };
             job.validate().unwrap();
             let (tx, rx) = std::sync::mpsc::channel();
             let _h = start(job, tools.ffmpeg.clone(), move |e| {
@@ -674,7 +871,7 @@ mod tests {
         let out = dir.join("part.mp3");
         let mut s = EncodeSettings { container: Container::Mp3, ..Default::default() };
         s.normalize();
-        let job = Job { src: src.clone(), audio_sel: vec![1], settings: s, range: Some((1.0, 2.0)), out: out.clone() };
+        let job = Job { src: src.clone(), audio_sel: vec![1], sub_sel: vec![], settings: s, range: Some((1.0, 2.0)), out: out.clone() };
         let (tx, rx) = std::sync::mpsc::channel();
         start(job, tools.ffmpeg.clone(), move |e| {
             let _ = tx.send(e);
@@ -695,7 +892,8 @@ mod tests {
         let mut broken = src.clone();
         broken.path = bad;
         let out = dir.join("never.mp4");
-        let job = Job { src: broken, audio_sel: vec![0], settings: EncodeSettings::default(), range: None, out: out.clone() };
+        let job =
+            Job { src: broken, audio_sel: vec![0], sub_sel: vec![], settings: EncodeSettings::default(), range: None, out: out.clone() };
         let (tx, rx) = std::sync::mpsc::channel();
         start(job, tools.ffmpeg.clone(), move |e| {
             let _ = tx.send(e);
@@ -745,7 +943,7 @@ mod tests {
         s.preset = "veryslow".into();
         s.crf = 10;
         let out = dir.join("out.mp4");
-        let job = Job { src, audio_sel: vec![], settings: s, range: None, out: out.clone() };
+        let job = Job { src, audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() };
         let (tx, rx) = std::sync::mpsc::channel();
         let h = start(job, tools.ffmpeg.clone(), move |e| {
             let _ = tx.send(e);
@@ -812,7 +1010,8 @@ mod tests {
             let mut s = EncodeSettings { max_size: Some((640, 360)), ..Default::default() };
             s.preset = "ultrafast".into();
             let out = dir.join(format!("{size}-out.mp4"));
-            let outcome = run_to_the_end(&tools, Job { src, audio_sel: vec![], settings: s, range: None, out: out.clone() });
+            let outcome =
+                run_to_the_end(&tools, Job { src, audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() });
             assert!(matches!(outcome, Outcome::Finished { .. }), "{size}: {outcome:?}");
             let v = crate::probe::run(&tools.ffprobe, &out).unwrap().video.unwrap();
             assert_eq!((v.width, v.height), want, "{size}");
@@ -839,8 +1038,10 @@ mod tests {
                 s.bit_depth = bits;
                 s.normalize();
                 let out = dir.join(format!("{vc:?}-{bits}.{}", container.ext()));
-                let outcome =
-                    run_to_the_end(&tools, Job { src: src.clone(), audio_sel: vec![], settings: s, range: None, out: out.clone() });
+                let outcome = run_to_the_end(
+                    &tools,
+                    Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() },
+                );
                 assert!(matches!(outcome, Outcome::Finished { .. }), "{vc:?} {bits}: {outcome:?}");
                 let want = if bits == 10 { "yuv420p10le" } else { "yuv420p" };
                 assert_eq!(pix_fmt(&tools, &out), want, "{vc:?} {bits}");
@@ -862,9 +1063,13 @@ mod tests {
         s.preset = "veryslow".into();
         let out = dir.join("out.mp4");
         let (tx, rx) = std::sync::mpsc::channel();
-        let h = start(Job { src, audio_sel: vec![], settings: s, range: None, out: out.clone() }, tools.ffmpeg.clone(), move |e| {
-            let _ = tx.send(e);
-        });
+        let h = start(
+            Job { src, audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() },
+            tools.ffmpeg.clone(),
+            move |e| {
+                let _ = tx.send(e);
+            },
+        );
         // Wait for the first progress, so the process surely exists, then hold it.
         let mut seen = 0.0;
         while seen == 0.0 {
@@ -900,5 +1105,315 @@ mod tests {
         let mut s = out.as_os_str().to_owned();
         s.push(".part");
         PathBuf::from(s).exists()
+    }
+
+    fn sub(codec: &str) -> crate::probe::SubTrack {
+        crate::probe::SubTrack { codec: codec.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn filters_and_the_size_limit_form_one_chain() {
+        let mut s = EncodeSettings::default();
+        s.max_size = Some((1280, 720));
+        s.filters.denoise = crate::filters::Strength::Light;
+        s.filters.grayscale = true;
+        let l = line(&job(s));
+        assert!(l.contains("-vf hqdn3d=2:1:2:3,hue=s=0,scale=w="), "{l}");
+        let none = line(&job(EncodeSettings::default()));
+        assert!(!none.contains("-vf"), "no filter, no -vf: {none}");
+    }
+
+    #[test]
+    fn an_average_bitrate_replaces_the_quality() {
+        let mut s = EncodeSettings { rate: RateMode::Bitrate, video_kbps: 1500, ..Default::default() };
+        s.normalize();
+        let l = line(&job(s));
+        assert!(l.contains("-c:v libx264 -preset medium -b:v 1500k -pix_fmt yuv420p"), "{l}");
+        assert!(!l.contains("-crf") && !l.contains("-pass"), "{l}");
+    }
+
+    #[test]
+    fn a_target_size_becomes_the_bitrate_left_after_the_audio() {
+        // 100 s, 60 MB: about 4 770 kb/s in all, less two tracks of 160 kb/s.
+        let mut s = EncodeSettings { rate: RateMode::TargetSize, target_mb: 60, ..Default::default() };
+        s.normalize();
+        let j = job(s.clone());
+        let kbps = j.target_kbps().unwrap();
+        assert!((4400..=4500).contains(&kbps), "{kbps}");
+        assert!(line(&j).contains(&format!("-b:v {kbps}k")));
+        // With one track of the two, more is left for the picture.
+        let mut one = job(s.clone());
+        one.audio_sel = vec![1];
+        assert!(one.target_kbps().unwrap() > kbps);
+        // A size the audio alone would eat is refused in words.
+        s.target_mb = 1;
+        assert!(job(s).validate().unwrap_err().contains("too small"));
+        // Without a known length no size can be aimed at.
+        let mut unknown = job(EncodeSettings { rate: RateMode::TargetSize, ..Default::default() });
+        unknown.src.duration = None;
+        assert!(unknown.validate().unwrap_err().contains("not known"));
+    }
+
+    #[test]
+    fn two_passes_name_the_same_statistics_and_the_first_writes_nothing() {
+        let mut s = EncodeSettings { rate: RateMode::Bitrate, two_pass: true, ..Default::default() };
+        s.normalize();
+        let j = job(s);
+        let text = |args: Vec<OsString>| args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        let one = text(args_for(&j, Pass::First("stats")));
+        assert!(one.contains("-pass 1 -passlogfile stats") && one.contains("-an -sn"), "{one}");
+        assert!(!one.contains("-map 0:a") && !one.contains("-c:a") && !one.contains("-movflags"), "{one}");
+        assert!(one.ends_with("-f null -progress pipe:1 -stats_period 0.5 -"), "{one}");
+        let two = text(args_for(&j, Pass::Second("stats")));
+        assert!(two.contains("-pass 2 -passlogfile stats") && two.contains("-map 0:a:0") && two.ends_with("/out/film.mp4.part"), "{two}");
+    }
+
+    #[test]
+    fn subtitles_follow_what_the_container_can_hold() {
+        let mut src = source();
+        src.subs = vec![sub("subrip"), sub("hdmv_pgs_subtitle"), sub("ass")];
+        let mut mp4 = job(EncodeSettings::default());
+        mp4.src = src.clone();
+        mp4.sub_sel = vec![0, 1, 2, 9];
+        let l = line(&mp4);
+        assert!(l.contains("-map 0:s:0") && l.contains("-map 0:s:2") && !l.contains("-map 0:s:1") && !l.contains("0:s:9"), "{l}");
+        assert!(l.contains("-c:s mov_text"), "{l}");
+        let mut mkv = mp4.clone();
+        mkv.settings.container = Container::Mkv;
+        let l = line(&mkv);
+        assert!(l.contains("-map 0:s:1") && l.contains("-c:s copy"), "pictures of text fit MKV: {l}");
+        let mut webm = mp4.clone();
+        webm.settings = EncodeSettings { container: Container::WebM, ..Default::default() };
+        webm.settings.normalize();
+        assert!(!line(&webm).contains("-map 0:s"), "WebM takes none of these");
+        let mut audio = mp4.clone();
+        audio.settings = EncodeSettings { container: Container::Mp3, ..Default::default() };
+        audio.settings.normalize();
+        assert!(!line(&audio).contains("-map 0:s") && !line(&audio).contains("-c:s"));
+        let mut none = mp4.clone();
+        none.sub_sel.clear();
+        assert!(!line(&none).contains("-c:s"), "no track, no subtitle codec");
+    }
+
+    #[test]
+    fn two_passes_make_each_half_of_the_progress() {
+        let p = |pass, passes, secs| Progress { pass, passes, out_secs: secs, ..Default::default() };
+        assert_eq!(p(0, 0, 5.0).fraction(Some(10.0)), Some(0.5), "a single run is as before");
+        assert_eq!(p(1, 2, 5.0).fraction(Some(10.0)), Some(0.25));
+        assert_eq!(p(2, 2, 5.0).fraction(Some(10.0)), Some(0.75));
+        assert_eq!(p(2, 2, 10.0).fraction(Some(10.0)), Some(1.0));
+    }
+
+    /// Runs `job` to the end and returns the file it made.
+    fn made(tools: &crate::deps::Tools, job: Job) -> SourceInfo {
+        let out = job.out.clone();
+        let outcome = run_to_the_end(tools, job);
+        assert!(matches!(outcome, Outcome::Finished { .. }), "{outcome:?}");
+        assert!(!job_part_exists(&out), "no .part file is left");
+        crate::probe::run(&tools.ffprobe, &out).unwrap()
+    }
+
+    #[test]
+    fn real_filters_change_the_picture_as_asked() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-filters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 640x360 picture with a black bar of 60 above and below it: 640x480 in all.
+        let barred = dir.join("barred.mp4");
+        let ok = Command::new(&tools.ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=14"])
+            .args(["-vf", "pad=640:480:0:60,format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast"])
+            .arg(&barred)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let src = crate::probe::run(&tools.ffprobe, &barred).unwrap();
+        let size = |i: &SourceInfo| i.video.as_ref().map(|v| (v.width, v.height)).unwrap();
+        assert_eq!(size(&src), (640, 480));
+        let fast = |s: &mut EncodeSettings| {
+            s.preset = "ultrafast".into();
+            s.normalize();
+        };
+        let run = |name: &str, filters: crate::filters::Filters, max: Option<(u32, u32)>| {
+            let mut s = EncodeSettings { filters, max_size: max, ..Default::default() };
+            fast(&mut s);
+            made(&tools, Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: dir.join(name) })
+        };
+        use crate::filters::{Crop, Deinterlace, Filters, Margins, Rotate, Strength};
+
+        // The bars are found and cut: 640x360 is left.
+        let auto = run("auto.mp4", Filters { crop: Crop::Auto, ..Default::default() }, None);
+        assert_eq!(size(&auto), (640, 360), "automatic crop");
+        // A crop by hand.
+        let hand = Filters { crop: Crop::Manual(Margins { left: 10, top: 20, right: 30, bottom: 40 }), ..Default::default() };
+        assert_eq!(size(&run("hand.mp4", hand, None)), (600, 420), "manual crop");
+        // Turned on its side, the picture is 480x640; the size limit follows the turn.
+        let turned = Filters { rotate: Rotate::Clockwise, ..Default::default() };
+        assert_eq!(size(&run("turned.mp4", turned.clone(), None)), (480, 640));
+        assert_eq!(size(&run("turned-small.mp4", turned, Some((320, 180)))), (180, 240), "turned and limited");
+        // Everything else just has to run through ffmpeg and give a picture of the same size.
+        let busy = Filters {
+            deinterlace: Deinterlace::Bwdif,
+            denoise: Strength::Medium,
+            sharpen: Strength::Strong,
+            grayscale: true,
+            flip_h: true,
+            flip_v: true,
+            custom: "eq=brightness=0.05".into(),
+            ..Default::default()
+        };
+        assert_eq!(size(&run("busy.mp4", busy, None)), (640, 480));
+        let yadif = Filters { deinterlace: Deinterlace::Yadif, ..Default::default() };
+        assert_eq!(size(&run("yadif.mp4", yadif, None)), (640, 480));
+        // Detelecine drops one picture in five, so the clip keeps its length with fewer frames.
+        let tele = Filters { detelecine: true, ..Default::default() };
+        let t = run("tele.mp4", tele, None);
+        assert_eq!(size(&t), (640, 480));
+        assert!((t.duration.unwrap() - 14.0).abs() < 1.0, "{:?}", t.duration);
+        // A custom filter that does not exist fails with ffmpeg's words and leaves nothing behind.
+        let bad = Filters { custom: "nosuchfilter=1".into(), ..Default::default() };
+        let mut s = EncodeSettings { filters: bad, ..Default::default() };
+        fast(&mut s);
+        let out = dir.join("bad.mp4");
+        let outcome = run_to_the_end(
+            &tools,
+            Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() },
+        );
+        assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
+        assert!(!out.exists() && !job_part_exists(&out));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn real_bitrates_sizes_and_two_passes_land_near_what_was_asked() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-rate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = clip(&tools, &dir, "src.mp4", "640x360", 10);
+        let kbps = |i: &SourceInfo, out: &Path| (std::fs::metadata(out).unwrap().len() as f64 * 8.0 / i.duration.unwrap() / 1000.0) as u32;
+        for (name, codec, container, two) in [
+            ("x264-1", VideoCodec::X264, Container::Mp4, false),
+            ("x264-2", VideoCodec::X264, Container::Mp4, true),
+            ("x265-2", VideoCodec::X265, Container::Mkv, true),
+            ("vp9-2", VideoCodec::Vp9, Container::WebM, true),
+            ("av1-2", VideoCodec::SvtAv1, Container::Mkv, true),
+        ] {
+            let mut s = EncodeSettings {
+                container,
+                rate: RateMode::Bitrate,
+                video_kbps: 600,
+                two_pass: two,
+                audio_codec: AudioCodec::None,
+                ..Default::default()
+            };
+            s.set_video_codec(codec);
+            s.preset = codec.presets()[codec.presets().len() - 1].to_string();
+            s.normalize();
+            assert_eq!(s.two_pass, two, "{name}");
+            let out = dir.join(format!("{name}.{}", container.ext()));
+            let job = Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() };
+            job.validate().unwrap();
+            let got = made(&tools, job);
+            let k = kbps(&got, &out);
+            assert!((300..=1200).contains(&k), "{name}: asked 600 kb/s, got {k}");
+            assert!(
+                std::fs::read_dir(std::env::temp_dir())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .all(|e| !e.file_name().to_string_lossy().starts_with(&format!("stiva-pass-{}", std::process::id()))),
+                "{name}: the statistics folder is removed"
+            );
+        }
+        // A size: about 0.5 MB for ten seconds, with no audio.
+        let mut s = EncodeSettings {
+            rate: RateMode::TargetSize,
+            target_mb: 1,
+            two_pass: true,
+            audio_codec: AudioCodec::None,
+            ..Default::default()
+        };
+        s.normalize();
+        let out = dir.join("size.mp4");
+        let got = made(&tools, Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: out.clone() });
+        let mb = std::fs::metadata(&out).unwrap().len() as f64 / 1_048_576.0;
+        assert!((0.5..=1.5).contains(&mb), "asked 1 MB, got {mb:.2} ({got:?})", got = got.duration);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn real_subtitles_and_chapters_come_along() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-subs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let srt = dir.join("a.srt");
+        std::fs::write(&srt, "1\n00:00:00,500 --> 00:00:02,000\nCiao\n\n2\n00:00:02,500 --> 00:00:04,000\nHello\n").unwrap();
+        let meta = dir.join("meta.txt");
+        std::fs::write(&meta, ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=One\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=6000\ntitle=Two\n").unwrap();
+        let film = dir.join("film.mkv");
+        let ok = Command::new(&tools.ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=6", "-i"])
+            .arg(&srt)
+            .arg("-i")
+            .arg(&srt)
+            .arg("-i")
+            .arg(&meta)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:0",
+                "-map",
+                "2:0",
+                "-map_chapters",
+                "3",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:s",
+                "srt",
+            ])
+            .args(["-metadata:s:s:0", "language=ita", "-metadata:s:s:1", "language=eng"])
+            .arg(&film)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "the test film could not be made");
+        let src = crate::probe::run(&tools.ffprobe, &film).unwrap();
+        assert_eq!((src.subs.len(), src.chapters.len()), (2, 2));
+        for (container, want_subs) in [(Container::Mkv, vec!["ita", "eng"]), (Container::Mp4, vec!["ita", "eng"])] {
+            let mut s = EncodeSettings { container, ..Default::default() };
+            s.preset = "ultrafast".into();
+            s.audio_codec = AudioCodec::None;
+            s.normalize();
+            let out = dir.join(format!("out.{}", container.ext()));
+            let got = made(&tools, Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![0, 1], settings: s, range: None, out });
+            assert_eq!(got.subs.iter().map(|t| t.lang.as_str()).collect::<Vec<_>>(), want_subs, "{container:?}");
+            assert_eq!(got.chapters.len(), 2, "{container:?}: chapters are carried over");
+            assert_eq!(got.chapters[1].title, "Two");
+        }
+        // Only the second track.
+        let mut s = EncodeSettings { audio_codec: AudioCodec::None, ..Default::default() };
+        s.preset = "ultrafast".into();
+        s.normalize();
+        let got = made(
+            &tools,
+            Job { src: src.clone(), audio_sel: vec![], sub_sel: vec![1], settings: s.clone(), range: None, out: dir.join("one.mp4") },
+        );
+        assert_eq!(got.subs.iter().map(|t| t.lang.as_str()).collect::<Vec<_>>(), ["eng"]);
+        // None.
+        let got = made(&tools, Job { src, audio_sel: vec![], sub_sel: vec![], settings: s, range: None, out: dir.join("none.mp4") });
+        assert!(got.subs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
