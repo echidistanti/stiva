@@ -36,6 +36,7 @@ pub const RANGE_BAD_END: &str = "The end time is not valid. Use 90, 1:30 or 1:02
 
 // Settings tabs
 pub const TAB_CONTAINER: &str = "Container";
+pub const TAB_SIZING: &str = "Sizing";
 pub const TAB_VIDEO: &str = "Video";
 pub const TAB_AUDIO: &str = "Audio";
 pub const FORMAT: &str = "Format";
@@ -95,10 +96,68 @@ pub const DISMISS: &str = "Dismiss";
 pub const ASK_TITLE: &str = "This file already exists";
 pub const ASK_OVERWRITE: &str = "Overwrite";
 pub const ASK_RENAME: &str = "Add a number";
-pub const ASK_CANCEL: &str = "Cancel";
+pub const ASK_CANCEL: &str = "Skip this file";
 
 // Closing while an encode runs
 pub const QUIT_TITLE: &str = "An encode is still running";
 pub const QUIT_BODY: &str = "If you quit now, it stops and the unfinished file is deleted.";
 pub const QUIT_STOP: &str = "Stop and quit";
 pub const QUIT_KEEP: &str = "Keep encoding";
+
+// Bit depth
+pub const VIDEO_BITS: &str = "Bit depth";
+pub const BITS_8: &str = "8-bit";
+pub const BITS_10: &str = "10-bit";
+pub const BITS_HINT: &str = "10-bit keeps gradients smooth and costs a little more space. Some TVs and phones cannot play it.";
+pub const BITS_ONLY_8: &str = "8-bit only";
+pub const BITS_ONLY_8_HINT: &str = "This encoder does not do 10-bit.";
+pub const BITS_FAILED_HINT: &str = "10-bit did not pass its test on this PC. encoders.txt in the logs folder says why.";
+
+// Sizing
+pub const SIZE_LABEL: &str = "Largest size";
+pub const SIZE_SOURCE: &str = "As the source";
+pub const SIZE_CUSTOM: &str = "Custom";
+pub const SIZE_HINT: &str = "Bigger pictures are scaled down to fit. Smaller ones are left alone, never enlarged.";
+pub const SIZE_FIT: &str = "Fit inside";
+pub const SIZE_FIT_HINT: &str = "Width and height of a landscape picture. A portrait one is fitted the same way, turned.";
+
+// Queue
+pub const ADD_TO_QUEUE: &str = "Add to queue";
+pub const PAUSE: &str = "Pause";
+pub const RESUME: &str = "Resume";
+pub const PAUSED: &str = "Paused";
+pub const TO_QUEUE: &str = "Queue";
+pub const TO_EDITOR: &str = "Back to the file";
+pub const TAB_QUEUED: &str = "Queued";
+pub const TAB_COMPLETED: &str = "Completed";
+pub const QUEUE_EMPTY: &str = "Nothing is waiting. Open a file, set it up and press Add to queue, or drop several files on the window.";
+pub const COMPLETED_EMPTY: &str = "Nothing has finished yet.";
+pub const CLEAR_COMPLETED: &str = "Clear completed";
+pub const WAITING: &str = "Waiting";
+pub const ADDED: &str = "Added to the queue";
+pub const VIEW_QUEUE: &str = "View queue";
+pub const REMOVE: &str = "Take off the queue";
+pub const RUN_AGAIN: &str = "Run again";
+pub const SKIPPED_EXISTS: &str = "Skipped, the file already exists";
+pub const MORE_WAITING: &str = "more waiting";
+
+// Presets
+pub const PRESET: &str = "Preset";
+pub const PRESET_CUSTOM: &str = "Custom";
+pub const PRESET_BUILTIN: &str = "Built in";
+pub const PRESET_YOURS: &str = "Yours";
+pub const PRESET_MODIFIED: &str = "Modified";
+pub const PRESET_SAVE: &str = "Save";
+pub const PRESET_SAVE_AS: &str = "Save as...";
+pub const PRESET_MORE: &str = "More";
+pub const PRESET_EXPORT: &str = "Export to a file...";
+pub const PRESET_IMPORT: &str = "Import from a file...";
+pub const PRESET_DELETE: &str = "Delete this preset";
+pub const PRESET_SAVE_TITLE: &str = "Save the settings as a preset";
+pub const PRESET_NAME_HINT: &str = "Name of the preset";
+pub const PRESET_REPLACES: &str = "This replaces your preset of the same name.";
+pub const PRESET_DELETE_TITLE: &str = "Delete this preset?";
+pub const PRESET_DELETE_YES: &str = "Delete";
+pub const PRESET_DELETE_NO: &str = "Keep it";
+pub const CANCEL: &str = "Cancel";
+pub const STOPPED_SHORT: &str = "Stopped";

@@ -6,7 +6,9 @@ use crate::caps::Capabilities;
 use crate::deps::{self, Tools};
 use crate::encode::{self, Event, Handle, Job, Outcome, Progress};
 use crate::model::{Container, EncodeSettings, VideoCodec};
+use crate::presets::{self, Preset};
 use crate::probe::{self, SourceInfo};
+use crate::queue::{Queue, State};
 use crate::settings::{self, DestMode, Resolution, Settings, WindowGeom};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -21,10 +23,15 @@ pub enum Msg {
     Tools(Result<Tools, String>),
     Setup(String, Option<f32>),
     Caps(Result<Capabilities, String>),
-    Picked(PathBuf),
+    Picked(Vec<PathBuf>),
     PickedFolder(PathBuf),
     PickedToolsDir(PathBuf),
     Probed(PathBuf, Result<SourceInfo, String>),
+    /// One file of several dropped or chosen together, read, with the settings at that moment.
+    Batch(PathBuf, Result<SourceInfo, String>, Box<EncodeSettings>),
+    PresetImported(Result<Preset, String>),
+    /// A short message for the amber line under the settings.
+    Said(String),
     Enc(u64, Event),
 }
 
@@ -73,20 +80,60 @@ pub enum Src {
     Ready(Source),
 }
 
+/// What the main area shows: the file being set up, or the list of jobs.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Page {
+    Editor,
+    Queue,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum QueueTab {
+    Queued,
+    Completed,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
     Container,
+    Sizing,
     Video,
     Audio,
 }
 
 pub struct Run {
     pub id: u64,
+    /// The job in the queue this run belongs to.
+    pub item: u64,
     pub handle: Handle,
     pub job: Job,
     pub progress: Option<Progress>,
     pub started: Instant,
     pub log: Vec<String>,
+    pub paused_at: Option<Instant>,
+    pub paused_before: Duration,
+}
+
+impl Run {
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Time spent encoding, without the time spent paused.
+    pub fn active(&self) -> Duration {
+        let paused = self.paused_before + self.paused_at.map_or(Duration::ZERO, |t| t.elapsed());
+        self.started.elapsed().saturating_sub(paused)
+    }
+
+    /// Seconds left: by the pace of the whole run so far, which pauses do not upset, or ffmpeg's own speed at the start.
+    pub fn eta(&self) -> Option<f64> {
+        let span = self.job.span();
+        let p = self.progress?;
+        match p.fraction(span) {
+            Some(f) if f >= 0.02 => Some(self.active().as_secs_f64() * (1.0 - f as f64) / f as f64),
+            _ => p.eta(span),
+        }
+    }
 }
 
 pub enum Report {
@@ -103,6 +150,8 @@ pub enum Report {
     Skipped(PathBuf),
     /// The job was refused before it started.
     Refused(String),
+    /// The file went into the queue.
+    Added,
 }
 
 pub struct Last {
@@ -120,12 +169,22 @@ pub struct App {
     pub caps: Option<Capabilities>,
     pub src: Src,
     pub tab: Tab,
+    pub page: Page,
+    pub qtab: QueueTab,
+    pub queue: Queue,
+    /// The queue is being worked through: when a job ends, the next one starts.
+    pub processing: bool,
+    pub builtin: Vec<Preset>,
+    pub user_presets: Vec<Preset>,
+    /// The name being typed in the "Save as" box, while it is open.
+    pub preset_name: Option<String>,
+    pub preset_delete: Option<String>,
     pub run: Option<Run>,
     pub last: Option<Last>,
     next_run: u64,
     pub show_options: bool,
-    /// A job waiting for the user to say what to do with a file that exists.
-    pub ask: Option<Job>,
+    /// The job in the queue that waits for the user to say what to do with a file that exists.
+    pub ask: Option<u64>,
     /// The window was asked to close during an encode, and the question is on screen.
     pub confirm_quit: bool,
     pub quit_confirmed: bool,
@@ -134,8 +193,8 @@ pub struct App {
     geom: Option<WindowGeom>,
     dirty: bool,
     last_save: Instant,
-    /// A file named on the command line (Open with, Send to), opened as soon as ffmpeg is ready.
-    pending_open: Option<PathBuf>,
+    /// Files named on the command line (Open with, Send to), opened as soon as ffmpeg is ready.
+    pending_open: Vec<PathBuf>,
     /// Debug builds only: start the encode as soon as the file is read, to look at the progress.
     auto_encode: bool,
 }
@@ -147,7 +206,7 @@ const MEDIA_EXTS: [&str; 24] = [
 ];
 
 impl App {
-    pub fn new(ctx: egui::Context, mut set: Settings, open: Option<PathBuf>) -> App {
+    pub fn new(ctx: egui::Context, mut set: Settings, open: Vec<PathBuf>) -> App {
         let (tx, rx) = channel();
         set.encode.normalize();
         let mut app = App {
@@ -162,8 +221,17 @@ impl App {
             tab: match (cfg!(debug_assertions), std::env::var("STIVA_TAB").as_deref()) {
                 (true, Ok("audio")) => Tab::Audio,
                 (true, Ok("container")) => Tab::Container,
+                (true, Ok("sizing")) => Tab::Sizing,
                 _ => Tab::Video,
             },
+            page: Page::Editor,
+            qtab: QueueTab::Queued,
+            queue: Queue::load(&queue_file()),
+            processing: false,
+            builtin: presets::builtin(),
+            user_presets: presets::load_dir(&presets::dir()).into_iter().map(|(_, p)| p).collect(),
+            preset_name: None,
+            preset_delete: None,
             run: None,
             last: None,
             next_run: 1,
@@ -226,9 +294,8 @@ impl App {
                         ctx.request_repaint();
                     });
                     self.setup = Setup::Ready(t);
-                    if let Some(p) = self.pending_open.take() {
-                        self.load_source(p);
-                    }
+                    let paths = std::mem::take(&mut self.pending_open);
+                    self.open_files(paths);
                 }
                 Msg::Tools(Err(e)) => self.setup = Setup::Failed(e),
                 Msg::Caps(Ok(c)) => {
@@ -239,14 +306,24 @@ impl App {
                         enc.normalize();
                         self.dirty = true;
                     }
-                    // Which graphics-chip encoders passed their test, and why the others did not.
+                    if enc.bit_depth == 10 && !c.has_ten_bit(enc.video_codec.encoder()) {
+                        enc.bit_depth = 8;
+                        self.dirty = true;
+                    }
+                    // Which encoders passed their test, in 8 and 10 bit, and why the others did not.
                     let logs = deps::data_dir().join("logs");
                     let _ = std::fs::create_dir_all(&logs);
-                    let _ = std::fs::write(logs.join("hardware.txt"), c.hardware_report());
+                    let _ = std::fs::write(logs.join("encoders.txt"), c.report());
                     self.caps = Some(c);
                 }
                 Msg::Caps(Err(_)) => {}
-                Msg::Picked(p) => self.load_source(p),
+                Msg::Picked(paths) => self.open_files(paths),
+                Msg::Batch(path, res, settings) => self.batch_arrived(path, res, *settings),
+                Msg::PresetImported(res) => match res {
+                    Ok(p) => self.take_imported(p),
+                    Err(e) => self.note = Some(e),
+                },
+                Msg::Said(text) => self.note = Some(text),
                 Msg::PickedFolder(p) => {
                     self.set.dest_dir = Some(p);
                     self.dirty = true;
@@ -291,13 +368,28 @@ impl App {
             Event::Done(outcome) => {
                 let run = self.run.take().expect("checked above");
                 let name = run.job.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let report = match outcome {
-                    Outcome::Finished { out, bytes, elapsed } => Report::Done { out, bytes, elapsed },
-                    Outcome::Failed { code, tail } => Report::Failed { code, tail },
-                    Outcome::Cancelled => Report::Cancelled,
+                let stopped = matches!(outcome, Outcome::Cancelled);
+                let (report, state) = match outcome {
+                    Outcome::Finished { out, bytes, elapsed } => {
+                        (Report::Done { out: out.clone(), bytes, elapsed }, State::Done { out, bytes, secs: run.active().as_secs_f64() })
+                    }
+                    Outcome::Failed { code, tail } => {
+                        let why = tail.last().cloned().unwrap_or_else(|| format!("ffmpeg stopped with code {}", code.unwrap_or(-1)));
+                        (Report::Failed { code, tail }, State::Failed(why))
+                    }
+                    Outcome::Cancelled => (Report::Cancelled, State::Stopped),
                 };
+                if let Some(item) = self.queue.get_mut(run.item) {
+                    item.state = state;
+                }
+                self.queue_save();
                 save_log(&name, &run.log);
                 self.last = Some(Last { report, name, log: run.log });
+                if stopped {
+                    self.processing = false;
+                } else {
+                    self.start_next();
+                }
             }
         }
     }
@@ -305,8 +397,8 @@ impl App {
     pub fn open_picker(&self) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
-            let pick = rfd::FileDialog::new().add_filter("Video and audio", &MEDIA_EXTS).add_filter("All files", &["*"]).pick_file();
-            if let Some(p) = pick {
+            let pick = rfd::FileDialog::new().add_filter("Video and audio", &MEDIA_EXTS).add_filter("All files", &["*"]).pick_files();
+            if let Some(p) = pick.filter(|p| !p.is_empty()) {
                 let _ = tx.send(Msg::Picked(p));
                 ctx.request_repaint();
             }
@@ -341,43 +433,162 @@ impl App {
         });
     }
 
-    /// The Encode button: check, decide where the file goes, and start.
-    pub fn encode(&mut self) {
-        let Some(tools) = self.tools().cloned() else {
-            return;
-        };
-        if self.run.is_some() {
-            return;
-        }
-        let Src::Ready(src) = &self.src else { return };
-        let name = src.info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let refuse = |app: &mut App, why: String| {
-            app.last = Some(Last { report: Report::Refused(why), name: name.clone(), log: vec![] });
-        };
-        let range = match src.range() {
-            Ok(r) => r,
-            Err(e) => return refuse(self, e.to_string()),
-        };
-        let mut job =
-            Job { src: src.info.clone(), audio_sel: src.audio_selection(), settings: self.set.encode.clone(), range, out: PathBuf::new() };
-        if let Err(e) = job.validate() {
-            return refuse(self, e);
-        }
-        let desired = self.set.output_path(&src.info.path);
-        match settings::resolve(self.set.on_exists, desired.clone(), &src.info.path) {
-            Resolution::Use(p) => {
-                job.out = p;
-                self.launch(job, tools);
-            }
-            Resolution::Ask(p) => {
-                job.out = p;
-                self.ask = Some(job);
-            }
-            Resolution::Skip => self.last = Some(Last { report: Report::Skipped(desired), name, log: vec![] }),
+    /// One file opens in the window to be set up; several go straight into the queue with the settings as they are.
+    pub fn open_files(&mut self, paths: Vec<PathBuf>) {
+        match paths.as_slice() {
+            [] => {}
+            [one] => self.load_source(one.clone()),
+            _ => self.add_many(paths),
         }
     }
 
-    pub fn launch(&mut self, job: Job, tools: Tools) {
+    fn add_many(&mut self, paths: Vec<PathBuf>) {
+        let Some(t) = self.tools().cloned() else {
+            return;
+        };
+        let settings = self.set.encode.clone();
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            for path in paths {
+                let r = probe::run(&t.ffprobe, &path);
+                let _ = tx.send(Msg::Batch(path, r, Box::new(settings.clone())));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn batch_arrived(&mut self, path: PathBuf, res: Result<SourceInfo, String>, settings: EncodeSettings) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let job = res.and_then(|info| {
+            let audio_sel = (0..info.audio.len()).collect();
+            self.job_for(&info, audio_sel, None, &settings)
+        });
+        match job {
+            Ok(job) => {
+                self.queue.add(job);
+                self.queue_save();
+                self.page = Page::Queue;
+                self.qtab = QueueTab::Queued;
+            }
+            Err(e) => self.note = Some(format!("{name}: {e}")),
+        }
+    }
+
+    /// Why this PC or this ffmpeg cannot do what the settings ask, if it cannot.
+    fn unsupported(&self, st: &EncodeSettings) -> Option<String> {
+        let c = self.caps.as_ref()?;
+        if !st.container.audio_only() {
+            let (enc, label) = (st.video_codec.encoder(), st.video_codec.label());
+            if !c.has(enc) {
+                return Some(format!("{label} is not available here. Pick another video codec."));
+            }
+            if st.bit_depth >= 10 && !c.has_ten_bit(enc) {
+                return Some(format!("10-bit does not work with {label} on this PC. Choose 8-bit or another codec."));
+            }
+        }
+        match st.audio_codec.encoder() {
+            Some(enc) if !c.has(enc) => Some(format!("{} is not available here. Pick another audio codec.", st.audio_codec.label())),
+            _ => None,
+        }
+    }
+
+    /// A job for `info` with the given choices, or the reason there can be none.
+    fn job_for(&self, info: &SourceInfo, audio_sel: Vec<usize>, range: Option<(f64, f64)>, st: &EncodeSettings) -> Result<Job, String> {
+        if let Some(why) = self.unsupported(st) {
+            return Err(why);
+        }
+        let out = self.set.output_path_for(&info.path, st.container);
+        let job = Job { src: info.clone(), audio_sel, settings: st.clone(), range, out };
+        job.validate()?;
+        Ok(job)
+    }
+
+    /// Puts the file that is open in the window into the queue, and empties the window for the next one.
+    pub fn add_current(&mut self) -> bool {
+        let Src::Ready(src) = &self.src else { return false };
+        let name = src.info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let job = src.range().map_err(str::to_string).and_then(|r| self.job_for(&src.info, src.audio_selection(), r, &self.set.encode));
+        match job {
+            Ok(job) => {
+                self.queue.add(job);
+                self.queue_save();
+                self.src = Src::Empty;
+                self.last = Some(Last { report: Report::Added, name, log: vec![] });
+                true
+            }
+            Err(why) => {
+                self.last = Some(Last { report: Report::Refused(why), name, log: vec![] });
+                false
+            }
+        }
+    }
+
+    /// The Encode button: the open file joins the queue, and the queue is worked through from the top.
+    pub fn encode(&mut self) {
+        if self.tools().is_none() || self.run.is_some() {
+            return;
+        }
+        if matches!(self.src, Src::Ready(_)) && !self.add_current() {
+            return;
+        }
+        self.processing = true;
+        self.start_next();
+    }
+
+    /// Starts the job at the top of the queue, unless one is running or a question is open.
+    pub fn start_next(&mut self) {
+        if !self.processing || self.run.is_some() || self.ask.is_some() {
+            return;
+        }
+        let Some(id) = self.queue.next_waiting() else {
+            self.processing = false;
+            return;
+        };
+        let Some(item) = self.queue.get(id) else { return };
+        let job = item.job.clone();
+        let refuse = |app: &mut App, why: String| {
+            if let Some(item) = app.queue.get_mut(id) {
+                item.state = State::Failed(why.clone());
+            }
+            let name = job.src.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            app.last = Some(Last { report: Report::Failed { code: None, tail: vec![why] }, name, log: vec![] });
+            app.queue_save();
+            app.start_next();
+        };
+        if let Err(why) = job.validate() {
+            return refuse(self, why);
+        }
+        if let Some(why) = self.unsupported(&job.settings) {
+            return refuse(self, why);
+        }
+        match settings::resolve(self.set.on_exists, job.out.clone(), &job.src.path) {
+            Resolution::Use(p) => {
+                self.queue.get_mut(id).expect("just read").job.out = p;
+                self.launch(id);
+            }
+            Resolution::Ask(p) => {
+                self.queue.get_mut(id).expect("just read").job.out = p;
+                self.ask = Some(id);
+            }
+            Resolution::Skip => {
+                if let Some(item) = self.queue.get_mut(id) {
+                    item.state = State::Skipped(job.out.clone());
+                }
+                let name = job.src.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.last = Some(Last { report: Report::Skipped(job.out.clone()), name, log: vec![] });
+                self.queue_save();
+                self.start_next();
+            }
+        }
+    }
+
+    pub fn launch(&mut self, item: u64) {
+        let Some(tools) = self.tools().cloned() else {
+            return;
+        };
+        let Some(entry) = self.queue.get_mut(item) else { return };
+        entry.state = State::Running;
+        let job = entry.job.clone();
         let id = self.next_run;
         self.next_run += 1;
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
@@ -386,35 +597,195 @@ impl App {
             ctx.request_repaint();
         });
         self.last = None;
-        self.run = Some(Run { id, handle, job, progress: None, started: Instant::now(), log: vec![] });
+        self.queue_save();
+        self.run = Some(Run {
+            id,
+            item,
+            handle,
+            job,
+            progress: None,
+            started: Instant::now(),
+            log: vec![],
+            paused_at: None,
+            paused_before: Duration::ZERO,
+        });
     }
 
+    /// Ends the current job and stops working through the queue; what is still waiting stays in line.
     pub fn stop(&mut self) {
+        self.processing = false;
         if let Some(r) = &self.run {
+            if r.is_paused() {
+                r.handle.resume(); // a suspended process cannot act on being told to end
+            }
             r.handle.stop();
         }
     }
 
-    /// The program is closing: end the run and make sure no half file is left.
-    pub fn shutdown(&mut self) {
-        if let Some(r) = self.run.take() {
-            r.handle.shutdown(&r.job.part_path());
+    pub fn pause(&mut self) {
+        if let Some(r) = &mut self.run {
+            if !r.is_paused() && r.handle.pause() {
+                r.paused_at = Some(Instant::now());
+            }
         }
     }
 
-    pub fn can_encode(&self) -> bool {
-        self.tools().is_some() && self.run.is_none() && matches!(self.src, Src::Ready(_))
+    pub fn resume(&mut self) {
+        if let Some(r) = &mut self.run {
+            if let Some(at) = r.paused_at.take() {
+                r.paused_before += at.elapsed();
+                r.handle.resume();
+            }
+        }
     }
 
-    /// A file dropped on the window replaces the source.
+    /// The program is closing: end the run and make sure no half file is left. The job waits for the next time.
+    pub fn shutdown(&mut self) {
+        if let Some(r) = self.run.take() {
+            r.handle.shutdown(&r.job.part_path());
+            if let Some(item) = self.queue.get_mut(r.item) {
+                item.state = State::Waiting;
+            }
+        }
+        self.queue_save();
+    }
+
+    // ---- presets
+
+    pub fn preset(&self, name: &str) -> Option<&Preset> {
+        self.builtin.iter().chain(self.user_presets.iter()).find(|p| p.name == name)
+    }
+
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.builtin.iter().any(|p| p.name == name)
+    }
+
+    /// The settings have moved away from the preset they started from.
+    pub fn preset_modified(&self) -> bool {
+        self.set.preset.as_deref().and_then(|n| self.preset(n)).is_some_and(|p| p.settings != self.set.encode)
+    }
+
+    pub fn apply_preset(&mut self, name: &str) {
+        let Some(p) = self.preset(name).cloned() else { return };
+        self.set.encode = p.settings;
+        self.set.preset = Some(p.name);
+        // A preset made on another PC may ask for an encoder this one does not have.
+        self.note = self.unsupported(&self.set.encode);
+        self.dirty = true;
+    }
+
+    fn reload_presets(&mut self) {
+        self.user_presets = presets::load_dir(&presets::dir()).into_iter().map(|(_, p)| p).collect();
+    }
+
+    /// Why the name typed in the "Save as" box cannot be used, if it cannot.
+    pub fn preset_error(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Some("Give the preset a name.".into());
+        }
+        self.builtin
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(name))
+            .then(|| "A preset that comes with Stiva has this name. Pick another.".into())
+    }
+
+    /// Keeps the settings in the window as a preset of the user's own, and selects it.
+    pub fn save_preset_as(&mut self, name: &str) -> Result<(), String> {
+        if let Some(why) = self.preset_error(name) {
+            return Err(why);
+        }
+        let name = name.trim();
+        // The same name in other letters is the same preset: file names on Windows do not tell the two apart.
+        let name = self.user_presets.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map_or(name.to_string(), |p| p.name.clone());
+        presets::save_in(&presets::dir(), &Preset { name: name.clone(), settings: self.set.encode.clone() })?;
+        self.reload_presets();
+        self.set.preset = Some(name);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// The selected preset of the user's own takes the settings now in the window.
+    pub fn save_preset_over(&mut self) {
+        let Some(name) = self.set.preset.clone().filter(|n| !self.is_builtin(n)) else { return };
+        if let Err(e) = presets::save_in(&presets::dir(), &Preset { name, settings: self.set.encode.clone() }) {
+            self.note = Some(e);
+        }
+        self.reload_presets();
+    }
+
+    pub fn delete_preset(&mut self, name: &str) {
+        if self.is_builtin(name) {
+            return;
+        }
+        if let Err(e) = presets::delete_in(&presets::dir(), name) {
+            self.note = Some(e);
+        }
+        self.reload_presets();
+        if self.set.preset.as_deref() == Some(name) {
+            self.set.preset = None;
+            self.dirty = true;
+        }
+    }
+
+    pub fn export_preset(&self) {
+        let name = self.set.preset.clone().unwrap_or_else(|| "My preset".into());
+        let preset = Preset { name: name.clone(), settings: self.set.encode.clone() };
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let pick = rfd::FileDialog::new().add_filter("Stiva preset", &["json"]).set_file_name(presets::file_name(&name)).save_file();
+            if let Some(path) = pick {
+                let said = match presets::write_file(&path, &preset) {
+                    Ok(()) => "The preset was saved to the file.".to_string(),
+                    Err(e) => format!("The preset could not be saved: {e}"),
+                };
+                let _ = tx.send(Msg::Said(said));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    pub fn import_preset(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Stiva preset", &["json"]).pick_file() {
+                let _ = tx.send(Msg::PresetImported(presets::read_file(&path)));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// A preset read from a file joins the user's own, under a free name, and is selected.
+    fn take_imported(&mut self, mut p: Preset) {
+        let name = {
+            let taken: Vec<&str> = self.builtin.iter().chain(&self.user_presets).map(|q| q.name.as_str()).collect();
+            presets::unique_name(&taken, &p.name)
+        };
+        p.name = name.clone();
+        match presets::save_in(&presets::dir(), &p) {
+            Ok(()) => {
+                self.reload_presets();
+                self.apply_preset(&name);
+            }
+            Err(e) => self.note = Some(e),
+        }
+    }
+
+    pub fn queue_save(&self) {
+        self.queue.save(&queue_file());
+    }
+
+    pub fn can_encode(&self) -> bool {
+        self.tools().is_some() && self.run.is_none() && (matches!(self.src, Src::Ready(_)) || self.queue.waiting() > 0)
+    }
+
+    /// Files dropped on the window: one is opened to be set up, several go into the queue.
     pub fn accept_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if self.tools().is_none() {
             return;
         }
-        if let Some(p) = dropped.into_iter().find(|p| p.is_file()) {
-            self.load_source(p);
-        }
+        self.open_files(dropped.into_iter().filter(|p| p.is_file()).collect());
     }
 
     /// Remembers where the window is, so the next run opens it there.
@@ -489,6 +860,10 @@ impl App {
     pub fn dest_mode_next(&self) -> bool {
         self.set.dest_mode == DestMode::NextToSource
     }
+}
+
+fn queue_file() -> PathBuf {
+    deps::data_dir().join("queue.json")
 }
 
 /// Keeps the log of each encode next to the program's other data, the newest 30.

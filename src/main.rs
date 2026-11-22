@@ -6,7 +6,9 @@ mod deps;
 mod encode;
 mod icon;
 mod model;
+mod presets;
 mod probe;
+mod queue;
 mod settings;
 mod strings;
 mod ui;
@@ -14,8 +16,8 @@ mod view;
 
 fn main() -> eframe::Result {
     let set = settings::Settings::load();
-    // A file given on the command line, as when Windows opens it with this program.
-    let open = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file());
+    // Files given on the command line, as when Windows opens them with this program.
+    let open: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect();
     let mut size = app::START_SIZE;
     let mut viewport = eframe::egui::ViewportBuilder::default().with_decorations(false).with_min_inner_size(app::MIN_SIZE);
     if let Some(g) = &set.window {

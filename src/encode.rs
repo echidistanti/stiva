@@ -3,6 +3,7 @@
 
 use crate::model::{AudioCodec, Container, EncodeSettings};
 use crate::probe::SourceInfo;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Job {
     pub src: SourceInfo,
     /// Which audio tracks to keep, as positions in `src.audio`.
@@ -67,6 +68,14 @@ impl Job {
     }
 }
 
+/// A scale filter that fits the picture inside `long` x `short`, whichever way the picture is turned.
+/// It never enlarges, and both sides stay even, which the encoders need.
+pub fn scale_filter((a, b): (u32, u32)) -> String {
+    let (long, short) = (a.max(b), a.min(b));
+    let f = format!("min(1,min({long}/max(iw,ih),{short}/min(iw,ih)))");
+    format!("scale=w='trunc(iw*{f}/2)*2':h='trunc(ih*{f}/2)*2':flags=lanczos")
+}
+
 fn secs(v: f64) -> String {
     format!("{v:.3}")
 }
@@ -110,7 +119,10 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
 
     if video {
         let codec = st.video_codec;
-        let mut args = codec.args(st.crf, &st.preset);
+        if let Some(size) = st.max_size {
+            o(&["-vf", &scale_filter(size)]);
+        }
+        let mut args = codec.args(st.crf, &st.preset, st.bit_depth);
         if codec.is_hevc() && st.container == Container::Mp4 {
             // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
             args.extend(["-tag:v".to_string(), "hvc1".to_string()]);
@@ -247,6 +259,51 @@ impl Handle {
                 let _ = c.kill();
             }
         }
+    }
+}
+
+impl Handle {
+    /// Holds the run still without ending it: the ffmpeg process is suspended, so it uses no processor.
+    pub fn pause(&self) -> bool {
+        self.suspend(true)
+    }
+
+    pub fn resume(&self) -> bool {
+        self.suspend(false)
+    }
+
+    fn suspend(&self, on: bool) -> bool {
+        self.child.lock().ok().and_then(|g| g.as_ref().map(|c| suspend::set(c, on))).unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+mod suspend {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSuspendProcess(process: *mut c_void) -> i32;
+        fn NtResumeProcess(process: *mut c_void) -> i32;
+    }
+
+    pub fn set(child: &Child, on: bool) -> bool {
+        let handle = child.as_raw_handle();
+        // SAFETY: the handle belongs to the child, which `Child` keeps open for as long as it is alive.
+        let status = unsafe { if on { NtSuspendProcess(handle) } else { NtResumeProcess(handle) } };
+        status >= 0
+    }
+}
+
+/// Only for trying the pause on the build machine; the program itself is for Windows.
+#[cfg(not(windows))]
+mod suspend {
+    use std::process::{Child, Command};
+
+    pub fn set(child: &Child, on: bool) -> bool {
+        Command::new("kill").args([if on { "-STOP" } else { "-CONT" }, &child.id().to_string()]).status().is_ok_and(|s| s.success())
     }
 }
 
@@ -704,6 +761,139 @@ mod tests {
         assert!(matches!(outcome, Outcome::Cancelled | Outcome::Finished { .. }), "{outcome:?}");
         assert!(!job_part_exists(&out));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A generated clip of the given size, in `dir`.
+    fn clip(tools: &crate::deps::Tools, dir: &Path, name: &str, size: &str, secs: u32) -> SourceInfo {
+        let path = dir.join(name);
+        let ok = Command::new(&tools.ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate=25:duration={secs}")])
+            .args(["-c:v", "libx264", "-preset", "ultrafast"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "the clip {name} could not be made");
+        crate::probe::run(&tools.ffprobe, &path).unwrap()
+    }
+
+    fn run_to_the_end(tools: &crate::deps::Tools, job: Job) -> Outcome {
+        let (tx, rx) = std::sync::mpsc::channel();
+        start(job, tools.ffmpeg.clone(), move |e| {
+            let _ = tx.send(e);
+        });
+        loop {
+            if let Event::Done(o) = rx.recv_timeout(Duration::from_secs(120)).expect("ffmpeg did not finish") {
+                break o;
+            }
+        }
+    }
+
+    fn pix_fmt(tools: &crate::deps::Tools, file: &Path) -> String {
+        let out = Command::new(&tools.ffprobe)
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0"])
+            .arg(file)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn the_scale_filter_fits_the_box_never_enlarges_and_follows_the_turn_of_the_picture() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // (clip size, expected size inside a 640 x 360 box: long side 640 at most, short side 360 at most, both even)
+        for (size, want) in [("1280x720", (640, 360)), ("720x1280", (360, 640)), ("320x180", (320, 180)), ("1000x562", (640, 358))] {
+            let src = clip(&tools, &dir, &format!("{size}.mkv"), size, 1);
+            let mut s = EncodeSettings { max_size: Some((640, 360)), ..Default::default() };
+            s.preset = "ultrafast".into();
+            let out = dir.join(format!("{size}-out.mp4"));
+            let outcome = run_to_the_end(&tools, Job { src, audio_sel: vec![], settings: s, range: None, out: out.clone() });
+            assert!(matches!(outcome, Outcome::Finished { .. }), "{size}: {outcome:?}");
+            let v = crate::probe::run(&tools.ffprobe, &out).unwrap().video.unwrap();
+            assert_eq!((v.width, v.height), want, "{size}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ten_bit_encodes_come_out_in_ten_bit_and_eight_bit_ones_in_eight() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-bits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = clip(&tools, &dir, "in.mkv", "320x180", 1);
+        for (vc, container) in
+            [(VideoCodec::X264, Container::Mkv), (VideoCodec::X265, Container::Mp4), (VideoCodec::SvtAv1, Container::Mkv)]
+        {
+            for bits in [8u8, 10] {
+                let mut s = EncodeSettings { container, bit_depth: bits, ..Default::default() };
+                s.set_video_codec(vc);
+                s.preset = vc.presets()[vc.presets().len() - 1].to_string();
+                s.bit_depth = bits;
+                s.normalize();
+                let out = dir.join(format!("{vc:?}-{bits}.{}", container.ext()));
+                let outcome =
+                    run_to_the_end(&tools, Job { src: src.clone(), audio_sel: vec![], settings: s, range: None, out: out.clone() });
+                assert!(matches!(outcome, Outcome::Finished { .. }), "{vc:?} {bits}: {outcome:?}");
+                let want = if bits == 10 { "yuv420p10le" } else { "yuv420p" };
+                assert_eq!(pix_fmt(&tools, &out), want, "{vc:?} {bits}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pausing_holds_the_run_still_and_resuming_lets_it_finish() {
+        let Some(tools) = crate::deps::locate(None) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("stiva-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = clip(&tools, &dir, "long.mkv", "1280x720", 6);
+        let mut s = EncodeSettings::default();
+        s.preset = "veryslow".into();
+        let out = dir.join("out.mp4");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = start(Job { src, audio_sel: vec![], settings: s, range: None, out: out.clone() }, tools.ffmpeg.clone(), move |e| {
+            let _ = tx.send(e);
+        });
+        // Wait for the first progress, so the process surely exists, then hold it.
+        let mut seen = 0.0;
+        while seen == 0.0 {
+            if let Event::Progress(p) = rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                seen = p.out_secs;
+            }
+        }
+        assert!(h.pause(), "the process could not be suspended");
+        std::thread::sleep(Duration::from_millis(700)); // lets what was already written come through
+        while rx.try_recv().is_ok() {}
+        let before = std::fs::metadata(job_part(&out)).map(|m| m.len()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(rx.try_recv().is_err(), "no progress while paused");
+        assert_eq!(std::fs::metadata(job_part(&out)).map(|m| m.len()).unwrap_or(0), before, "the file does not grow while paused");
+        assert!(h.resume());
+        let outcome = loop {
+            if let Event::Done(o) = rx.recv_timeout(Duration::from_secs(120)).unwrap() {
+                break o;
+            }
+        };
+        assert!(matches!(outcome, Outcome::Finished { .. }), "{outcome:?}");
+        assert!(out.exists() && !job_part_exists(&out));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn job_part(out: &Path) -> PathBuf {
+        let mut s = out.as_os_str().to_owned();
+        s.push(".part");
+        PathBuf::from(s)
     }
 
     fn job_part_exists(out: &Path) -> bool {

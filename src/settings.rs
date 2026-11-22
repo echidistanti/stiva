@@ -51,6 +51,8 @@ pub struct Settings {
     /// Folder holding ffmpeg and ffprobe, when the user does not want the downloaded ones.
     pub ffmpeg_dir: Option<PathBuf>,
     pub encode: EncodeSettings,
+    /// The preset the settings started from, by name; the window says "Modified" when they have moved away from it.
+    pub preset: Option<String>,
     pub window: Option<WindowGeom>,
 }
 
@@ -88,12 +90,17 @@ impl Settings {
 
     /// Where the file for `src` would be written, before any check about existing files.
     pub fn output_path(&self, src: &Path) -> PathBuf {
+        self.output_path_for(src, self.encode.container)
+    }
+
+    /// The same, for a job that was set up with another container than the one now in the window.
+    pub fn output_path_for(&self, src: &Path, container: crate::model::Container) -> PathBuf {
         let dir = match self.dest_mode {
             DestMode::NextToSource => src.parent().map(Path::to_path_buf).unwrap_or_else(|| self.out_dir()),
             DestMode::Folder => self.out_dir(),
         };
         let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "video".into());
-        dir.join(format!("{stem}.{}", self.encode.container.ext()))
+        dir.join(format!("{stem}.{}", container.ext()))
     }
 }
 
@@ -120,6 +127,11 @@ pub fn unique(path: &Path) -> PathBuf {
     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     (1..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).expect("an endless range always ends")
+}
+
+/// The path itself when it is free, otherwise the first free numbered one.
+pub fn unique_with(path: &Path) -> PathBuf {
+    if path.exists() { unique(path) } else { path.to_path_buf() }
 }
 
 /// Applies the choice about existing files. The source file is never the target: when the output

@@ -1,9 +1,10 @@
 //! Everything that is drawn. The state lives in `app`; this file reads it and records what the user did
 //! as `Action`s, which are carried out after the frame has been drawn.
 
-use crate::app::{self, App, Last, Report, Setup, Source, Src, Tab};
-use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown};
+use crate::app::{self, App, Last, Page, QueueTab, Report, Run, Setup, Source, Src, Tab};
+use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, SIZE_STEPS};
 use crate::probe::{channel_name, human_bitrate, human_duration, human_size};
+use crate::queue::{self, State};
 use crate::settings::{DestMode, OnExists};
 use crate::strings as s;
 use crate::ui::{self, muted};
@@ -13,8 +14,22 @@ use std::path::PathBuf;
 pub enum Action {
     OpenPicker,
     CloseSource,
+    AddToQueue,
     Encode,
     Stop,
+    Pause,
+    Resume,
+    TogglePage,
+    ShowQueue,
+    RemoveItem(u64),
+    RetryItem(u64),
+    ClearFinished,
+    ApplyPreset(String),
+    SavePreset,
+    OpenSaveAs,
+    AskDelete,
+    ExportPreset,
+    ImportPreset,
     PickOutFolder,
     OpenOutFolder,
     PickToolsDir,
@@ -91,13 +106,22 @@ impl App {
                     actions.push(Action::OpenPicker);
                 }
             });
+            ui.add_enabled_ui(ready && matches!(self.src, Src::Ready(_)), |ui| {
+                if ui::pill(ui, s::ADD_TO_QUEUE, ui::Kind::Soft, 15.0).clicked() {
+                    actions.push(Action::AddToQueue);
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui::icon_button(ui, ui::Icon::Gear, self.show_options).on_hover_text(s::OPTIONS).clicked() {
                     self.show_options = !self.show_options;
                 }
-                if self.run.is_some() {
+                if let Some(run) = &self.run {
                     if ui::pill(ui, s::STOP, ui::Kind::Soft, 16.0).clicked() {
                         actions.push(Action::Stop);
+                    }
+                    let (text, action) = if run.is_paused() { (s::RESUME, Action::Resume) } else { (s::PAUSE, Action::Pause) };
+                    if ui::pill(ui, text, ui::Kind::Primary, 16.0).clicked() {
+                        actions.push(action);
                     }
                 } else {
                     ui.add_enabled_ui(self.can_encode(), |ui| {
@@ -105,6 +129,14 @@ impl App {
                             actions.push(Action::Encode);
                         }
                     });
+                }
+                let open = self.queue.open();
+                let (text, kind) = match self.page {
+                    Page::Editor => (if open > 0 { format!("{} ({open})", s::TO_QUEUE) } else { s::TO_QUEUE.to_string() }, ui::Kind::Soft),
+                    Page::Queue => (s::TO_EDITOR.to_string(), ui::Kind::Selected),
+                };
+                if ui::pill(ui, &text, kind, 15.0).clicked() {
+                    actions.push(Action::TogglePage);
                 }
             });
         });
@@ -261,13 +293,77 @@ impl App {
         }
     }
 
-    fn settings_card(&mut self, ui: &mut egui::Ui) {
+    fn preset_row(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let selected = self.set.preset.clone().filter(|n| self.preset(n).is_some());
+        let modified = self.preset_modified();
+        let own = selected.as_deref().is_some_and(|n| !self.is_builtin(n));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.allocate_ui_with_layout(egui::vec2(112.0, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(muted(s::PRESET));
+            });
+            let mut pick: Option<String> = None;
+            let shown = selected.clone().unwrap_or_else(|| s::PRESET_CUSTOM.to_string());
+            egui::ComboBox::from_id_salt("preset").selected_text(shown).width(250.0).show_ui(ui, |ui| {
+                ui.label(muted(s::PRESET_BUILTIN));
+                for p in &self.builtin {
+                    if ui.selectable_label(selected.as_deref() == Some(p.name.as_str()), &p.name).clicked() {
+                        pick = Some(p.name.clone());
+                    }
+                }
+                if !self.user_presets.is_empty() {
+                    ui.separator();
+                    ui.label(muted(s::PRESET_YOURS));
+                    for p in &self.user_presets {
+                        if ui.selectable_label(selected.as_deref() == Some(p.name.as_str()), &p.name).clicked() {
+                            pick = Some(p.name.clone());
+                        }
+                    }
+                }
+            });
+            if let Some(n) = pick {
+                actions.push(Action::ApplyPreset(n));
+            }
+            if modified {
+                amber(ui, s::PRESET_MODIFIED);
+            }
+            if own && modified && ui::button(ui, s::PRESET_SAVE, ui::Kind::Soft).clicked() {
+                actions.push(Action::SavePreset);
+            }
+            if ui::button(ui, s::PRESET_SAVE_AS, ui::Kind::Soft).clicked() {
+                actions.push(Action::OpenSaveAs);
+            }
+            ui.menu_button(s::PRESET_MORE, |ui| {
+                if ui.button(s::PRESET_EXPORT).clicked() {
+                    actions.push(Action::ExportPreset);
+                    ui.close();
+                }
+                if ui.button(s::PRESET_IMPORT).clicked() {
+                    actions.push(Action::ImportPreset);
+                    ui.close();
+                }
+                if ui.add_enabled(own, egui::Button::new(s::PRESET_DELETE)).clicked() {
+                    actions.push(Action::AskDelete);
+                    ui.close();
+                }
+            });
+        });
+        ui.add_space(8.0);
+    }
+
+    fn settings_card(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let caps = self.caps.clone();
         let has = |enc: &str| caps.as_ref().is_none_or(|c| c.has(enc));
         let before = self.set.encode.clone();
         ui::card(ui, ui::CARD, Stroke::new(1.0, ui::LINE), |ui| {
+            self.preset_row(ui, actions);
             ui.horizontal(|ui| {
-                for (tab, name) in [(Tab::Container, s::TAB_CONTAINER), (Tab::Video, s::TAB_VIDEO), (Tab::Audio, s::TAB_AUDIO)] {
+                for (tab, name) in [
+                    (Tab::Container, s::TAB_CONTAINER),
+                    (Tab::Sizing, s::TAB_SIZING),
+                    (Tab::Video, s::TAB_VIDEO),
+                    (Tab::Audio, s::TAB_AUDIO),
+                ] {
                     let kind = if self.tab == tab { ui::Kind::Selected } else { ui::Kind::Soft };
                     if ui::button(ui, name, kind).clicked() {
                         self.tab = tab;
@@ -287,6 +383,37 @@ impl App {
                         ui.label(muted(app::container_note(enc.container)));
                     });
                 }
+                Tab::Sizing => {
+                    if enc.container.audio_only() {
+                        ui.label(muted(s::NO_VIDEO_HERE));
+                    } else {
+                        setting_row(ui, s::SIZE_LABEL, |ui| {
+                            let step = SIZE_STEPS.iter().find(|(_, l, sh)| enc.max_size == Some((*l, *sh)));
+                            let shown = match (enc.max_size, step) {
+                                (None, _) => s::SIZE_SOURCE,
+                                (Some(_), Some((name, ..))) => name,
+                                (Some(_), None) => s::SIZE_CUSTOM,
+                            };
+                            egui::ComboBox::from_id_salt("size").selected_text(shown).width(190.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut enc.max_size, None, s::SIZE_SOURCE);
+                                for (name, l, sh) in SIZE_STEPS {
+                                    ui.selectable_value(&mut enc.max_size, Some((l, sh)), name);
+                                }
+                            });
+                            ui.label(muted(s::SIZE_HINT));
+                        });
+                        if let Some((w, h)) = &mut enc.max_size {
+                            setting_row(ui, s::SIZE_FIT, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::DragValue::new(w).range(64..=16384).suffix(" px"));
+                                    ui.label(muted("x"));
+                                    ui.add(egui::DragValue::new(h).range(64..=16384).suffix(" px"));
+                                });
+                                ui.label(muted(s::SIZE_FIT_HINT));
+                            });
+                        }
+                    }
+                }
                 Tab::Video => {
                     if enc.container.audio_only() {
                         ui.label(muted(s::NO_VIDEO_HERE));
@@ -304,6 +431,23 @@ impl App {
                                 }
                             });
                             enc.set_video_codec(pick);
+                        });
+                        setting_row(ui, s::VIDEO_BITS, |ui| {
+                            if caps.as_ref().is_some_and(|c| c.has_ten_bit(enc.video_codec.encoder())) {
+                                let shown = if enc.bit_depth >= 10 { s::BITS_10 } else { s::BITS_8 };
+                                egui::ComboBox::from_id_salt("bits").selected_text(shown).width(190.0).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut enc.bit_depth, 8, s::BITS_8);
+                                    ui.selectable_value(&mut enc.bit_depth, 10, s::BITS_10);
+                                });
+                                ui.label(muted(s::BITS_HINT));
+                            } else {
+                                ui.add_enabled_ui(false, |ui| {
+                                    egui::ComboBox::from_id_salt("bits").selected_text(s::BITS_ONLY_8).width(190.0).show_ui(ui, |_| {});
+                                });
+                                let why =
+                                    if enc.video_codec.can_ten_bit() && caps.is_some() { s::BITS_FAILED_HINT } else { s::BITS_ONLY_8_HINT };
+                                ui.label(muted(why));
+                            }
                         });
                         setting_row(ui, s::VIDEO_QUALITY, |ui| {
                             let (lo, hi) = enc.video_codec.crf_range();
@@ -412,7 +556,11 @@ impl App {
             let name = run.job.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let frac = run.progress.and_then(|p| p.fraction(span));
             ui.horizontal(|ui| {
-                ui.label(RichText::new(s::ENCODING).size(14.0).strong());
+                if run.is_paused() {
+                    ui.label(RichText::new(s::PAUSED).size(14.0).strong().color(ui::WARN));
+                } else {
+                    ui.label(RichText::new(s::ENCODING).size(14.0).strong());
+                }
                 clipped(ui, muted(name));
             });
             ui.add_space(4.0);
@@ -430,17 +578,21 @@ impl App {
                     parts.push(format!("{:.2}x", p.speed));
                 }
             }
-            parts.push(format!("{} elapsed", human_duration(run.started.elapsed().as_secs_f64())));
+            parts.push(format!("{} elapsed", human_duration(run.active().as_secs_f64())));
+            if let Some(eta) = run.eta() {
+                parts.push(format!("{} left", human_duration(eta)));
+            }
             if let Some(p) = &run.progress {
-                if let Some(eta) = p.eta(span) {
-                    parts.push(format!("{} left", human_duration(eta)));
-                }
                 if p.kbps > 0.0 {
                     parts.push(format!("{:.0} kb/s", p.kbps));
                 }
                 if p.size > 0 {
                     parts.push(human_size(p.size));
                 }
+            }
+            let waiting = self.queue.waiting();
+            if waiting > 0 {
+                parts.push(format!("{waiting} {}", s::MORE_WAITING));
             }
             ui.label(muted(parts.join(" · ")));
             log_box(ui, &run.log, false, "log_run");
@@ -457,6 +609,9 @@ impl App {
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 right(ui, actions);
+                if matches!(report, Report::Added) && ui::button(ui, s::VIEW_QUEUE, ui::Kind::Soft).clicked() {
+                    actions.push(Action::ShowQueue);
+                }
                 if let Report::Done { out, .. } = report {
                     if ui::button(ui, s::OPEN, ui::Kind::Primary).clicked() {
                         actions.push(Action::OpenFile(out.clone()));
@@ -485,6 +640,10 @@ impl App {
                     Report::Refused(why) => {
                         ui.label(RichText::new(why.clone()).size(13.0).color(ui::WARN));
                     }
+                    Report::Added => {
+                        ui.label(RichText::new(s::ADDED).size(14.0).strong().color(ui::SUCCESS));
+                        clipped(ui, muted(name.clone()));
+                    }
                 });
             });
         });
@@ -494,8 +653,8 @@ impl App {
     }
 
     fn ask_modal(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let Some(job) = &self.ask else { return };
-        let path = job.out.display().to_string();
+        let Some(item) = self.ask.and_then(|id| self.queue.get(id)) else { return };
+        let path = item.job.out.display().to_string();
         egui::Modal::new(egui::Id::NULL.with("ask_exists")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.label(RichText::new(s::ASK_TITLE).size(17.0).strong());
@@ -514,6 +673,224 @@ impl App {
                 }
             });
         });
+    }
+
+    fn queue_page(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let (open, finished) = (self.queue.open(), self.queue.finished());
+        ui.horizontal(|ui| {
+            for (tab, text) in [
+                (QueueTab::Queued, format!("{} ({open})", s::TAB_QUEUED)),
+                (QueueTab::Completed, format!("{} ({finished})", s::TAB_COMPLETED)),
+            ] {
+                let kind = if self.qtab == tab { ui::Kind::Selected } else { ui::Kind::Soft };
+                if ui::button(ui, &text, kind).clicked() {
+                    self.qtab = tab;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.qtab == QueueTab::Completed && finished > 0 && ui::button(ui, s::CLEAR_COMPLETED, ui::Kind::Ghost).clicked() {
+                    actions.push(Action::ClearFinished);
+                }
+            });
+        });
+        ui.add_space(10.0);
+        let want_open = self.qtab == QueueTab::Queued;
+        let rows: Vec<(u64, String, String, State, std::path::PathBuf)> = self
+            .queue
+            .items
+            .iter()
+            .filter(|i| i.state.is_open() == want_open)
+            .map(|i| {
+                let name = i.job.src.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                (i.id, name, queue::summary(&i.job.settings), i.state.clone(), i.job.out.clone())
+            })
+            .collect();
+        if rows.is_empty() {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| ui.label(muted(if want_open { s::QUEUE_EMPTY } else { s::COMPLETED_EMPTY })));
+            return;
+        }
+        for (id, name, summary, state, out) in rows {
+            ui::card(ui, ui::CARD, Stroke::new(1.0, ui::LINE), |ui| {
+                ui.set_width(ui.available_width());
+                self.queue_row(ui, id, &name, &summary, &state, &out, actions);
+            });
+            ui.add_space(8.0);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_row(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        name: &str,
+        summary: &str,
+        state: &State,
+        out: &std::path::Path,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match state {
+                    State::Waiting => {
+                        if ui::close(ui).on_hover_text(s::REMOVE).clicked() {
+                            actions.push(Action::RemoveItem(id));
+                        }
+                        ui.label(muted(s::WAITING));
+                    }
+                    State::Running => {
+                        let paused = self.run.as_ref().is_some_and(Run::is_paused);
+                        if paused {
+                            ui.label(RichText::new(s::PAUSED).size(13.0).color(ui::WARN));
+                        } else {
+                            ui.label(RichText::new(s::ENCODING).size(13.0).color(ui::ACCENT));
+                        }
+                    }
+                    State::Done { out, .. } => {
+                        if ui::close(ui).on_hover_text(s::REMOVE).clicked() {
+                            actions.push(Action::RemoveItem(id));
+                        }
+                        if ui::button(ui, s::OPEN, ui::Kind::Primary).clicked() {
+                            actions.push(Action::OpenFile(out.clone()));
+                        }
+                        if ui::button(ui, s::SHOW, ui::Kind::Soft).clicked() {
+                            actions.push(Action::Reveal(out.clone()));
+                        }
+                    }
+                    State::Failed(_) | State::Stopped | State::Skipped(_) => {
+                        if ui::close(ui).on_hover_text(s::REMOVE).clicked() {
+                            actions.push(Action::RemoveItem(id));
+                        }
+                        if ui::button(ui, s::RUN_AGAIN, ui::Kind::Soft).clicked() {
+                            actions.push(Action::RetryItem(id));
+                        }
+                    }
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    clipped(ui, RichText::new(name).size(15.0).strong());
+                });
+            });
+        });
+        ui.add_space(2.0);
+        match state {
+            State::Done { bytes, secs, .. } => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(s::DONE).size(13.0).strong().color(ui::SUCCESS));
+                    clipped(ui, muted(format!("{} · {} · {summary}", human_size(*bytes), human_duration(*secs))));
+                });
+            }
+            State::Failed(why) => {
+                ui.label(RichText::new(why).size(13.0).color(ui::DANGER));
+                ui.label(muted(summary));
+            }
+            State::Stopped => {
+                ui.label(muted(format!("{} · {summary}", s::STOPPED_SHORT)));
+            }
+            State::Skipped(p) => {
+                ui.label(RichText::new(s::SKIPPED_EXISTS).size(13.0).color(ui::WARN));
+                clipped(ui, muted(p.display().to_string()));
+            }
+            State::Waiting => {
+                ui.label(muted(summary));
+                clipped(ui, muted(format!("to {}", out.display())));
+            }
+            State::Running => {
+                ui.label(muted(summary));
+                if let Some(run) = self.run.as_ref().filter(|r| r.item == id) {
+                    let frac = run.progress.and_then(|p| p.fraction(run.job.span()));
+                    ui.add_space(4.0);
+                    ui::bar(ui, frac, ui::ACCENT);
+                    let mut parts = vec![];
+                    if let Some(f) = frac {
+                        parts.push(format!("{}%", (f * 100.0).floor() as u32));
+                    }
+                    if let Some(eta) = run.eta() {
+                        parts.push(format!("{} left", human_duration(eta)));
+                    }
+                    if let Some(p) = run.progress.filter(|p| p.fps > 0.0) {
+                        parts.push(format!("{:.1} fps", p.fps));
+                    }
+                    ui.label(muted(parts.join(" · ")));
+                }
+            }
+        }
+    }
+
+    /// The two small questions about presets: what to call a new one, and whether to delete one.
+    fn preset_modals(&mut self, ctx: &egui::Context) {
+        if let Some(mut name) = self.preset_name.clone() {
+            let (mut save, mut cancel) = (false, false);
+            let replaces = self.user_presets.iter().any(|p| p.name.eq_ignore_ascii_case(name.trim()));
+            let error = self.preset_error(&name);
+            egui::Modal::new(egui::Id::NULL.with("preset_name")).show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(RichText::new(s::PRESET_SAVE_TITLE).size(17.0).strong());
+                ui.add_space(8.0);
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .hint_text(s::PRESET_NAME_HINT)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(10, 6)),
+                );
+                if !edit.has_focus() && !edit.lost_focus() {
+                    edit.request_focus();
+                }
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                ui.add_space(4.0);
+                match &error {
+                    Some(e) => amber(ui, e),
+                    None if replaces => amber(ui, s::PRESET_REPLACES),
+                    None => {}
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(error.is_none(), |ui| {
+                        if ui::pill(ui, s::PRESET_SAVE, ui::Kind::Primary, 14.0).clicked() {
+                            save = true;
+                        }
+                    });
+                    if ui::button(ui, s::CANCEL, ui::Kind::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    }
+                });
+            });
+            self.preset_name = Some(name.clone());
+            if save && error.is_none() {
+                match self.save_preset_as(&name) {
+                    Ok(()) => self.preset_name = None,
+                    Err(e) => self.note = Some(e),
+                }
+            } else if cancel {
+                self.preset_name = None;
+            }
+        }
+        if let Some(name) = self.preset_delete.clone() {
+            let (mut yes, mut no) = (false, false);
+            egui::Modal::new(egui::Id::NULL.with("preset_delete")).show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(RichText::new(s::PRESET_DELETE_TITLE).size(17.0).strong());
+                ui.add_space(4.0);
+                ui.label(muted(name.clone()));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui::pill(ui, s::PRESET_DELETE_YES, ui::Kind::Primary, 14.0).clicked() {
+                        yes = true;
+                    }
+                    if ui::button(ui, s::PRESET_DELETE_NO, ui::Kind::Soft).clicked() {
+                        no = true;
+                    }
+                });
+            });
+            if yes {
+                self.delete_preset(&name);
+            }
+            if yes || no {
+                self.preset_delete = None;
+            }
+        }
     }
 
     /// Closing the window while an encode runs asks first; ffmpeg must not be left running without a window.
@@ -555,8 +932,34 @@ impl App {
                 self.src = Src::Empty;
                 self.reset_note();
             }
+            Action::AddToQueue => {
+                self.add_current();
+            }
             Action::Encode => self.encode(),
             Action::Stop => self.stop(),
+            Action::Pause => self.pause(),
+            Action::Resume => self.resume(),
+            Action::TogglePage => self.page = if self.page == Page::Editor { Page::Queue } else { Page::Editor },
+            Action::ShowQueue => self.page = Page::Queue,
+            Action::RemoveItem(id) => {
+                self.queue.remove(id);
+                self.queue_save();
+            }
+            Action::RetryItem(id) => {
+                self.queue.retry(id);
+                self.queue_save();
+                self.qtab = QueueTab::Queued;
+            }
+            Action::ClearFinished => {
+                self.queue.clear_finished();
+                self.queue_save();
+            }
+            Action::ApplyPreset(name) => self.apply_preset(&name),
+            Action::SavePreset => self.save_preset_over(),
+            Action::OpenSaveAs => self.preset_name = Some(self.set.preset.clone().filter(|n| !self.is_builtin(n)).unwrap_or_default()),
+            Action::AskDelete => self.preset_delete = self.set.preset.clone().filter(|n| !self.is_builtin(n)),
+            Action::ExportPreset => self.export_preset(),
+            Action::ImportPreset => self.import_preset(),
             Action::PickOutFolder => self.pick_folder(Some(self.set.out_dir()), app::Msg::PickedFolder),
             Action::OpenOutFolder => {
                 let dir = self.set.out_dir();
@@ -575,17 +978,27 @@ impl App {
             Action::OpenFile(p) => app::open_path(&p),
             Action::Reveal(p) => app::reveal(&p),
             Action::AskOverwrite => {
-                if let (Some(job), Some(t)) = (self.ask.take(), self.tools().cloned()) {
-                    self.launch(job, t);
+                if let Some(id) = self.ask.take() {
+                    self.launch(id);
                 }
             }
             Action::AskRename => {
-                if let (Some(mut job), Some(t)) = (self.ask.take(), self.tools().cloned()) {
-                    job.out = crate::settings::unique(&job.out);
-                    self.launch(job, t);
+                if let Some(id) = self.ask.take() {
+                    if let Some(item) = self.queue.get_mut(id) {
+                        item.job.out = crate::settings::unique(&item.job.out);
+                    }
+                    self.launch(id);
                 }
             }
-            Action::AskCancel => self.ask = None,
+            Action::AskCancel => {
+                if let Some(id) = self.ask.take() {
+                    if let Some(item) = self.queue.get_mut(id) {
+                        item.state = State::Skipped(item.job.out.clone());
+                    }
+                    self.queue_save();
+                    self.start_next();
+                }
+            }
         }
     }
 }
@@ -712,10 +1125,13 @@ impl eframe::App for App {
                 self.setup_card(ui, &mut actions);
                 return;
             }
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                self.source_card(ui, hovering, &mut actions);
-                ui.add_space(12.0);
-                self.settings_card(ui);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.page {
+                Page::Editor => {
+                    self.source_card(ui, hovering, &mut actions);
+                    ui.add_space(12.0);
+                    self.settings_card(ui, &mut actions);
+                }
+                Page::Queue => self.queue_page(ui, &mut actions),
             });
         });
 
@@ -723,6 +1139,7 @@ impl eframe::App for App {
             self.options_area(&ctx, &mut actions);
         }
         self.ask_modal(&ctx, &mut actions);
+        self.preset_modals(&ctx);
         self.quit_modal(&ctx);
         ui::border(&ctx);
         ui::resize_edges(&ctx);

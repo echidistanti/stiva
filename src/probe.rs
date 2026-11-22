@@ -1,12 +1,12 @@
 //! Reads a media file with ffprobe: duration, video, audio tracks, subtitles, chapters.
 //! The JSON parsing is separate from running the program, so it can be tested with a sample.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
     pub codec: String,
     pub width: u32,
@@ -16,7 +16,7 @@ pub struct VideoInfo {
     pub bit_rate: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioTrack {
     /// Number of the stream in the file.
     pub index: usize,
@@ -30,7 +30,7 @@ pub struct AudioTrack {
     pub default: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubTrack {
     pub index: usize,
     pub codec: String,
@@ -40,14 +40,14 @@ pub struct SubTrack {
     pub default: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chapter {
     pub start: f64,
     pub end: f64,
     pub title: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SourceInfo {
     pub path: PathBuf,
     pub container: String,

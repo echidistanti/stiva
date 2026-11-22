@@ -149,6 +149,11 @@ impl VideoCodec {
         !matches!(self, VideoCodec::X264 | VideoCodec::X265 | VideoCodec::SvtAv1 | VideoCodec::Vp9)
     }
 
+    /// Whether 10-bit is worth testing: H.264 on a graphics chip is 8-bit only in practice.
+    pub fn can_ten_bit(self) -> bool {
+        !matches!(self, VideoCodec::H264Amf | VideoCodec::H264Nvenc | VideoCodec::H264Qsv)
+    }
+
     pub fn is_hevc(self) -> bool {
         matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv)
     }
@@ -206,22 +211,29 @@ impl VideoCodec {
 
     /// The ffmpeg options for this codec at a given quality and speed. The test encode that decides whether a
     /// hardware encoder is offered uses these same options, so what passes the test is what the real encode runs.
-    pub fn args(self, crf: u32, preset: &str) -> Vec<String> {
+    pub fn args(self, crf: u32, preset: &str, bits: u8) -> Vec<String> {
         use VideoCodec::*;
         let crf = crf.to_string();
+        // Graphics chips take NV12 (8-bit) or P010 (10-bit); the software encoders take planar YUV.
+        let pix = match (self.is_hardware(), bits >= 10) {
+            (false, false) => "yuv420p",
+            (false, true) => "yuv420p10le",
+            (true, false) => "nv12",
+            (true, true) => "p010le",
+        };
         let mut a: Vec<&str> = vec!["-c:v", self.encoder()];
         match self {
-            X264 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
-            X265 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p", "-x265-params", "log-level=error"]),
-            SvtAv1 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]),
-            Vp9 => a.extend(["-crf", &crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset, "-pix_fmt", "yuv420p"]),
+            X264 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix]),
+            X265 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix, "-x265-params", "log-level=error"]),
+            SvtAv1 => a.extend(["-preset", preset, "-crf", &crf, "-pix_fmt", pix]),
+            Vp9 => a.extend(["-crf", &crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", preset, "-pix_fmt", pix]),
             // Constant quantizer; the other rate modes come with the bitrate options.
-            H264Amf | HevcAmf | Av1Amf => a.extend(["-quality", preset, "-rc", "cqp", "-qp_i", &crf, "-qp_p", &crf, "-pix_fmt", "nv12"]),
+            H264Amf | HevcAmf | Av1Amf => a.extend(["-quality", preset, "-rc", "cqp", "-qp_i", &crf, "-qp_p", &crf, "-pix_fmt", pix]),
             // Variable bitrate steered by a quality level, with no bitrate cap.
             H264Nvenc | HevcNvenc | Av1Nvenc => {
-                a.extend(["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &crf, "-b:v", "0", "-pix_fmt", "nv12"])
+                a.extend(["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &crf, "-b:v", "0", "-pix_fmt", pix])
             }
-            H264Qsv | HevcQsv | Av1Qsv => a.extend(["-preset", preset, "-global_quality", &crf, "-pix_fmt", "nv12"]),
+            H264Qsv | HevcQsv | Av1Qsv => a.extend(["-preset", preset, "-global_quality", &crf, "-pix_fmt", pix]),
         }
         a.into_iter().map(String::from).collect()
     }
@@ -310,6 +322,17 @@ impl Mixdown {
     }
 }
 
+/// The sizes offered in the Sizing tab: the name and the longest and shortest side.
+pub const SIZE_STEPS: [(&str, u32, u32); 7] = [
+    ("2160p (4K)", 3840, 2160),
+    ("1440p", 2560, 1440),
+    ("1080p", 1920, 1080),
+    ("720p", 1280, 720),
+    ("576p", 1024, 576),
+    ("480p", 854, 480),
+    ("360p", 640, 360),
+];
+
 pub const AUDIO_KBPS: [u32; 8] = [64, 96, 128, 160, 192, 256, 320, 384];
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -323,6 +346,10 @@ pub struct EncodeSettings {
     pub audio_kbps: u32,
     pub mixdown: Mixdown,
     pub gain_db: f32,
+    /// 8 or 10 bits per colour.
+    pub bit_depth: u8,
+    /// Longest and shortest side the picture may have; larger pictures are scaled down, never up.
+    pub max_size: Option<(u32, u32)>,
 }
 
 impl Default for EncodeSettings {
@@ -336,6 +363,8 @@ impl Default for EncodeSettings {
             audio_kbps: 160,
             mixdown: Mixdown::Source,
             gain_db: 0.0,
+            bit_depth: 8,
+            max_size: None,
         }
     }
 }
@@ -365,6 +394,8 @@ impl EncodeSettings {
             self.preset = self.video_codec.default_preset().into();
         }
         self.gain_db = self.gain_db.clamp(-30.0, 30.0);
+        self.max_size = self.max_size.map(|(a, b)| (a.clamp(64, 16384), b.clamp(64, 16384)));
+        self.bit_depth = if self.bit_depth >= 10 && self.video_codec.can_ten_bit() { 10 } else { 8 };
         changed
     }
 
@@ -374,6 +405,9 @@ impl EncodeSettings {
             self.video_codec = codec;
             self.crf = codec.default_crf();
             self.preset = codec.default_preset().into();
+            if !codec.can_ten_bit() {
+                self.bit_depth = 8;
+            }
         }
     }
 
@@ -434,7 +468,7 @@ mod tests {
             let (lo, hi) = c.crf_range();
             assert!((lo..=hi).contains(&c.default_crf()), "{c:?} quality");
             assert!(c.presets().contains(&c.default_preset()), "{c:?} speed");
-            let args = c.args(c.default_crf(), c.default_preset());
+            let args = c.args(c.default_crf(), c.default_preset(), 8);
             assert_eq!(&args[..2], ["-c:v", c.encoder()], "{c:?}");
         }
     }
