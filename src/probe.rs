@@ -198,15 +198,28 @@ pub fn parse(json: &str, path: &Path) -> Result<SourceInfo, String> {
     Ok(info)
 }
 
+/// What ffprobe said, as a sentence a person can act on, then a line break and ffprobe's own first line
+/// for whoever wants the details.
+pub fn friendly(stderr: &str) -> String {
+    let raw = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("ffprobe gave no reason").trim();
+    let low = raw.to_lowercase();
+    let sentence = if low.contains("no such file") {
+        "The file cannot be found. It may have been moved or renamed."
+    } else if low.contains("permission denied") || low.contains("access is denied") {
+        "Windows does not let Stiva read this file."
+    } else {
+        "Stiva cannot read this file. It may be damaged, or it is not a video or audio file."
+    };
+    format!("{sentence}\n{raw}")
+}
+
 pub fn run(ffprobe: &Path, file: &Path) -> Result<SourceInfo, String> {
     let mut cmd = Command::new(ffprobe);
     cmd.args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-i"]).arg(file);
     crate::deps::quiet(&mut cmd);
     let out = cmd.output().map_err(|e| format!("ffprobe could not start: {e}"))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("ffprobe could not read the file");
-        return Err(first.trim().to_string());
+        return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
     }
     parse(&String::from_utf8_lossy(&out.stdout), file)
 }
@@ -216,6 +229,22 @@ pub fn human_duration(secs: f64) -> String {
     let t = secs.max(0.0).round() as u64;
     let (h, m, s) = (t / 3600, (t / 60) % 60, t % 60);
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// "11.0 MB -> 4.7 MB (-57%)": what the encode did to the size. With no size to compare it is just the new one.
+pub fn human_change(from: u64, to: u64) -> String {
+    if from == 0 {
+        return human_size(to);
+    }
+    let pct = (to as f64 / from as f64 - 1.0) * 100.0;
+    let change = if pct <= -0.5 {
+        format!("-{:.0}%", pct.abs())
+    } else if pct >= 0.5 {
+        format!("+{pct:.0}%")
+    } else {
+        "same size".to_string()
+    };
+    format!("{} \u{2192} {} ({change})", human_size(from), human_size(to))
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -270,6 +299,25 @@ pub fn channel_name(channels: u32, layout: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_change_in_size_is_told_in_a_percentage() {
+        let mb = |n: f64| (n * 1_048_576.0) as u64;
+        assert_eq!(super::human_change(mb(10.0), mb(4.0)), "10.0 MB \u{2192} 4.0 MB (-60%)");
+        assert!(super::human_change(mb(10.0), mb(12.0)).ends_with("(+20%)"));
+        assert!(super::human_change(mb(10.0), mb(10.01)).ends_with("(same size)"));
+        assert_eq!(super::human_change(0, mb(4.0)), "4.0 MB", "no source size to compare with");
+    }
+
+    #[test]
+    fn what_ffprobe_says_becomes_a_sentence_with_the_details_below() {
+        let a = super::friendly("Truncating packet of size 10611 to 16\nmore\n");
+        assert_eq!(a.lines().next().unwrap(), "Stiva cannot read this file. It may be damaged, or it is not a video or audio file.");
+        assert_eq!(a.lines().nth(1).unwrap(), "Truncating packet of size 10611 to 16");
+        assert!(super::friendly("x.mkv: No such file or directory").starts_with("The file cannot be found"));
+        assert!(super::friendly("Permission denied").starts_with("Windows does not let Stiva"));
+        assert!(super::friendly("").contains("no reason"));
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"{

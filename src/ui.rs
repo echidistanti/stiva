@@ -17,12 +17,15 @@ pub const MUTED: Color32 = Color32::from_rgb(0x9b, 0xa1, 0xa7);
 pub const TITLE: Color32 = Color32::from_rgb(0x0f, 0x10, 0x11);
 /// Fill of the main buttons and of the progress bar.
 pub const ACCENT: Color32 = Color32::from_rgb(0x8b, 0x5c, 0xf6);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xa1, 0x7c, 0xf8);
+/// Fill of the main buttons: darker than the accent, so white text on it reads at 5:1.
+pub const ACCENT_FILL: Color32 = Color32::from_rgb(0x7c, 0x4d, 0xee);
+/// The same fill under the pointer; the text on it stays above 4.5:1.
+pub const ACCENT_FILL_HOVER: Color32 = Color32::from_rgb(0x85, 0x57, 0xf2);
 /// The accent as text or outline on a dark background: lighter, so it stays readable.
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xb9, 0xa3, 0xfb);
 pub const ACCENT_DIM: Color32 = Color32::from_rgb(0x2b, 0x23, 0x48);
 pub const ON_ACCENT: Color32 = Color32::WHITE;
-pub const DANGER: Color32 = Color32::from_rgb(0xf0, 0x5d, 0x5d);
+pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6e, 0x6e);
 pub const DANGER_DIM: Color32 = Color32::from_rgb(0x41, 0x25, 0x28);
 /// A finished job.
 pub const SUCCESS: Color32 = Color32::from_rgb(0x4e, 0xc3, 0x8b);
@@ -132,13 +135,16 @@ pub enum Kind {
     Ghost,
     /// A choice that is on.
     Selected,
+    /// An action that destroys something: red, and never the one the eye is led to.
+    Danger,
 }
 
 impl Kind {
     /// Text colour, fill, fill when hovered, outline.
     fn colors(self) -> (Color32, Color32, Color32, Stroke) {
         match self {
-            Kind::Primary => (ON_ACCENT, ACCENT, ACCENT_HOVER, Stroke::NONE),
+            Kind::Primary => (ON_ACCENT, ACCENT_FILL, ACCENT_FILL_HOVER, Stroke::NONE),
+            Kind::Danger => (DANGER, DANGER_DIM, Color32::from_rgb(0x52, 0x2e, 0x31), Stroke::new(1.0, DANGER)),
             Kind::Soft => (TEXT, FIELD, HOVER, Stroke::NONE),
             Kind::Ghost => (MUTED, Color32::TRANSPARENT, FIELD, Stroke::NONE),
             Kind::Selected => (ACCENT_TEXT, ACCENT_DIM, Color32::from_rgb(0x38, 0x2d, 0x5e), Stroke::new(1.0, ACCENT)),
@@ -197,7 +203,7 @@ pub fn card<R>(ui: &mut Ui, fill: Color32, outline: Stroke, add: impl FnOnce(&mu
 /// A short label on a dark capsule: codec, size, resolution.
 pub fn chip(ui: &mut Ui, text: &str) {
     egui::Frame::new().fill(FIELD).corner_radius(CornerRadius::same(255)).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-        ui.label(RichText::new(text).size(12.0).color(MUTED));
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(MUTED)).extend());
     });
 }
 
@@ -263,7 +269,6 @@ pub fn empty_icon(ui: &mut Ui, hot: bool) {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Icon {
-    Gear,
     Folder,
     Close,
     Minimize,
@@ -286,15 +291,6 @@ pub fn draw_icon(p: &Painter, c: Pos2, icon: Icon, color: Color32) {
         Icon::Restore => {
             p.rect_stroke(Rect::from_center_size(at(-1.0, 1.0), vec2(8.0, 8.0)), CornerRadius::ZERO, st(1.3), StrokeKind::Middle);
             p.add(Shape::line(vec![at(-2.0, -5.0), at(5.0, -5.0), at(5.0, 2.0)], st(1.3)));
-        }
-        Icon::Gear => {
-            for k in 0..8 {
-                let a = k as f32 * std::f32::consts::FRAC_PI_4;
-                let d = vec2(a.cos(), a.sin());
-                p.line_segment([c + d * 5.5, c + d * 8.5], st(2.6));
-            }
-            p.circle_stroke(c, 5.5, st(2.0));
-            p.circle_stroke(c, 2.0, st(1.5));
         }
         Icon::Folder => {
             p.add(Shape::closed_line(

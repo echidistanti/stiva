@@ -208,3 +208,32 @@ pub const SUBTITLE_TRACKS: &str = "Subtitles";
 pub const SUBTITLE_NONE_HERE: &str = "Subtitles are not kept in this format.";
 pub const SUBTITLE_PICTURES: &str = "does not fit MP4";
 pub const SUBTITLE_HINT_MP4: &str = "MP4 keeps text subtitles only; the picture kind from DVDs and Blu-rays needs MKV.";
+
+// Shortcuts and tips
+pub const TIP_OPEN: &str = "Open a file (Ctrl+O)";
+pub const TIP_ENCODE: &str = "Start encoding (Ctrl+Enter)";
+pub const TIP_PAUSE: &str = "Pause (Space)";
+pub const TIP_RESUME: &str = "Resume (Space)";
+
+// Files that were not added
+pub const REFUSED_ONE: &str = "1 file was not added";
+pub const REFUSED_MANY: &str = "files were not added";
+pub const REFUSED_MORE: &str = "more";
+
+// A file without a picture
+pub const NO_PICTURE: &str = "This file has no picture, so it can only become an audio file.";
+pub const MAKE_MP3: &str = "Make it MP3";
+pub const MAKE_M4A: &str = "Make it M4A";
+pub const MAKE_OPUS: &str = "Make it Opus";
+
+// Undo
+pub const UNDO: &str = "Undo";
+pub const REMOVED_ONE: &str = "Removed from the queue";
+pub const REMOVED_MANY: &str = "cleared";
+pub const CLOSED_FILE: &str = "File closed";
+
+// Small things
+pub const DETAILS: &str = "Details";
+pub const BETTER: &str = "Better";
+pub const SMALLER: &str = "Smaller";
+pub const SOURCE_MORE: &str = "Tracks and range";

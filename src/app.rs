@@ -8,7 +8,7 @@ use crate::encode::{self, Event, Handle, Job, Outcome, Progress};
 use crate::model::{Container, EncodeSettings, VideoCodec};
 use crate::presets::{self, Preset};
 use crate::probe::{self, SourceInfo};
-use crate::queue::{Queue, State};
+use crate::queue::{Item, Queue, State};
 use crate::settings::{self, DestMode, Resolution, Settings, WindowGeom};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,8 @@ impl Run {
 pub enum Report {
     Done {
         out: PathBuf,
+        /// Size of the source, to show what the encode did to it.
+        from: u64,
         bytes: u64,
         elapsed: Duration,
     },
@@ -166,6 +168,16 @@ pub struct Last {
     pub name: String,
     pub log: Vec<String>,
 }
+
+/// Something the user took away and can have back for a few seconds.
+pub enum Undo {
+    Item(Item, usize),
+    Finished(Vec<(Item, usize)>),
+    Source(Box<Src>),
+}
+
+/// How long the Undo line stays.
+pub const UNDO_FOR: Duration = Duration::from_secs(10);
 
 pub struct App {
     pub ctx: egui::Context,
@@ -197,6 +209,10 @@ pub struct App {
     pub quit_confirmed: bool,
     /// A line in amber under the settings, about something the program changed by itself.
     pub note: Option<String>,
+    /// Files of the last batch that could not be added, with the reason; shown until dismissed.
+    pub refused: Vec<(String, String)>,
+    /// The last thing taken away, and until when it can be put back.
+    pub undo: Option<(Undo, Instant)>,
     geom: Option<WindowGeom>,
     dirty: bool,
     last_save: Instant,
@@ -248,6 +264,8 @@ impl App {
             confirm_quit: false,
             quit_confirmed: false,
             note: None,
+            refused: vec![],
+            undo: None,
             dirty: false,
             last_save: Instant::now(),
             pending_open: open,
@@ -383,9 +401,10 @@ impl App {
                 let name = run.job.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let stopped = matches!(outcome, Outcome::Cancelled);
                 let (report, state) = match outcome {
-                    Outcome::Finished { out, bytes, elapsed } => {
-                        (Report::Done { out: out.clone(), bytes, elapsed }, State::Done { out, bytes, secs: run.active().as_secs_f64() })
-                    }
+                    Outcome::Finished { out, bytes, elapsed } => (
+                        Report::Done { out: out.clone(), from: run.job.src.size, bytes, elapsed },
+                        State::Done { out, bytes, secs: run.active().as_secs_f64() },
+                    ),
                     Outcome::Failed { code, tail } => {
                         let why = tail.last().cloned().unwrap_or_else(|| format!("ffmpeg stopped with code {}", code.unwrap_or(-1)));
                         (Report::Failed { code, tail }, State::Failed(why))
@@ -460,6 +479,7 @@ impl App {
             return;
         };
         let settings = self.set.encode.clone();
+        self.refused.clear();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             for path in paths {
@@ -483,7 +503,7 @@ impl App {
                 self.page = Page::Queue;
                 self.qtab = QueueTab::Queued;
             }
-            Err(e) => self.note = Some(format!("{name}: {e}")),
+            Err(e) => self.refused.push((name, e)),
         }
     }
 
@@ -527,7 +547,7 @@ impl App {
     }
 
     /// Puts the file that is open in the window into the queue, and empties the window for the next one.
-    pub fn add_current(&mut self) -> bool {
+    pub fn add_current(&mut self, first: bool) -> bool {
         let Src::Ready(src) = &self.src else { return false };
         let name = src.info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let job = src
@@ -536,7 +556,11 @@ impl App {
             .and_then(|r| self.job_for(&src.info, src.audio_selection(), src.subtitle_selection(), r, &self.set.encode));
         match job {
             Ok(job) => {
-                self.queue.add(job);
+                if first {
+                    self.queue.add_first(job);
+                } else {
+                    self.queue.add(job);
+                }
                 self.queue_save();
                 self.src = Src::Empty;
                 self.last = Some(Last { report: Report::Added, name, log: vec![] });
@@ -549,12 +573,17 @@ impl App {
         }
     }
 
-    /// The Encode button: the open file joins the queue, and the queue is worked through from the top.
+    /// How many files the Encode button would work through: the open one and everything waiting.
+    pub fn to_encode(&self) -> usize {
+        self.queue.waiting() + usize::from(matches!(self.src, Src::Ready(_)))
+    }
+
+    /// The Encode button: the file in the window goes to the front of the queue, so it is the first one done.
     pub fn encode(&mut self) {
         if self.tools().is_none() || self.run.is_some() {
             return;
         }
-        if matches!(self.src, Src::Ready(_)) && !self.add_current() {
+        if matches!(self.src, Src::Ready(_)) && !self.add_current(true) {
             return;
         }
         self.processing = true;
@@ -877,6 +906,77 @@ impl App {
 
     pub fn using_custom_tools(&self) -> bool {
         self.set.ffmpeg_dir.as_deref().and_then(|d| deps::locate(Some(d))).is_some_and(|t| self.tools() == Some(&t))
+    }
+
+    /// Keeps what was taken away for a few seconds, and asks for a repaint when they are over.
+    fn keep_for_undo(&mut self, what: Undo) {
+        self.undo = Some((what, Instant::now() + UNDO_FOR));
+        self.ctx.request_repaint_after(UNDO_FOR + Duration::from_millis(50));
+    }
+
+    /// Drops the undo once its time is up.
+    pub fn expire_undo(&mut self) {
+        if self.undo.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
+            self.undo = None;
+        }
+    }
+
+    /// What the Undo line says, if there is one.
+    pub fn undo_text(&self) -> Option<String> {
+        self.undo.as_ref().map(|(u, _)| match u {
+            Undo::Item(..) => crate::strings::REMOVED_ONE.to_string(),
+            Undo::Finished(v) => {
+                format!("{} finished {} {}", v.len(), if v.len() == 1 { "job" } else { "jobs" }, crate::strings::REMOVED_MANY)
+            }
+            Undo::Source(_) => crate::strings::CLOSED_FILE.to_string(),
+        })
+    }
+
+    pub fn remove_item(&mut self, id: u64) {
+        if let Some((item, at)) = self.queue.take(id) {
+            self.queue_save();
+            self.keep_for_undo(Undo::Item(item, at));
+        }
+    }
+
+    pub fn clear_finished(&mut self) {
+        let taken = self.queue.take_finished();
+        if taken.is_empty() {
+            return;
+        }
+        self.queue_save();
+        self.keep_for_undo(Undo::Finished(taken));
+    }
+
+    /// Closes the file in the window. A file that was read can be got back; a failure has nothing to keep.
+    pub fn close_source(&mut self) {
+        let old = std::mem::replace(&mut self.src, Src::Empty);
+        self.reset_note();
+        if matches!(old, Src::Ready(_)) {
+            self.keep_for_undo(Undo::Source(Box::new(old)));
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let Some((what, _)) = self.undo.take() else { return };
+        match what {
+            Undo::Item(item, at) => {
+                self.queue.put_back(item, at);
+                self.queue_save();
+            }
+            Undo::Finished(taken) => {
+                for (item, at) in taken {
+                    self.queue.put_back(item, at);
+                }
+                self.queue_save();
+            }
+            Undo::Source(src) => {
+                // Only if the window is still empty: a file opened since is not thrown away.
+                if matches!(self.src, Src::Empty) {
+                    self.src = *src;
+                }
+            }
+        }
     }
 
     pub fn reset_note(&mut self) {
