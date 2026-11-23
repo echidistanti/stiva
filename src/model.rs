@@ -113,6 +113,65 @@ impl RateMode {
     }
 }
 
+/// What SVT-AV1 aims at when it decides where to spend bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum SvtTune {
+    #[default]
+    Visual,
+    Psnr,
+    Ssim,
+}
+
+impl SvtTune {
+    pub const ALL: [SvtTune; 3] = [SvtTune::Visual, SvtTune::Psnr, SvtTune::Ssim];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SvtTune::Visual => "Visual quality",
+            SvtTune::Psnr => "PSNR (measurements)",
+            SvtTune::Ssim => "SSIM (measurements)",
+        }
+    }
+
+    /// The value SVT-AV1 knows it by.
+    fn value(self) -> u8 {
+        match self {
+            SvtTune::Visual => 0,
+            SvtTune::Psnr => 1,
+            SvtTune::Ssim => 2,
+        }
+    }
+}
+
+/// Splits a line of options the way a command line would: spaces separate, quotes keep words together.
+pub fn split_options(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if started || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VideoCodec {
     X264,
@@ -186,6 +245,10 @@ impl VideoCodec {
     /// Two passes need the encoder to keep statistics between runs, which the graphics chips cannot.
     pub fn can_two_pass(self) -> bool {
         !self.is_hardware()
+    }
+
+    pub fn is_av1(self) -> bool {
+        matches!(self, VideoCodec::SvtAv1 | VideoCodec::Av1Amf | VideoCodec::Av1Nvenc | VideoCodec::Av1Qsv)
     }
 
     pub fn is_hevc(self) -> bool {
@@ -410,6 +473,14 @@ pub struct EncodeSettings {
     pub target_mb: u32,
     /// Two runs over the file for a steadier result at the same bitrate; only with a bitrate or a size.
     pub two_pass: bool,
+    /// SVT-AV1 only: what the encoder aims at.
+    pub svt_tune: SvtTune,
+    /// SVT-AV1 only: strength of the synthetic film grain, 0 for none (up to 50).
+    pub film_grain: u32,
+    /// SVT-AV1 only: take the grain out of the picture before encoding, when film grain is on.
+    pub grain_denoise: bool,
+    /// More options for the video encoder, written as on the ffmpeg command line.
+    pub extra_video: String,
     pub filters: Filters,
 }
 
@@ -430,6 +501,10 @@ impl Default for EncodeSettings {
             video_kbps: 2500,
             target_mb: 700,
             two_pass: false,
+            svt_tune: SvtTune::Visual,
+            film_grain: 0,
+            grain_denoise: true,
+            extra_video: String::new(),
             filters: Filters::default(),
         }
     }
@@ -439,6 +514,27 @@ impl EncodeSettings {
     /// Brings the choices back to a combination that works after one of them changed:
     /// a codec the container cannot hold is replaced, a quality out of range is pulled in.
     /// Returns true when something was replaced, so the window can say so.
+    /// The options that come after the codec's own: SVT-AV1's tune and film grain, then whatever the user wrote.
+    pub fn video_extras(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if self.video_codec == VideoCodec::SvtAv1 {
+            let mut params: Vec<String> = Vec::new();
+            if self.svt_tune != SvtTune::Visual {
+                params.push(format!("tune={}", self.svt_tune.value()));
+            }
+            if self.film_grain > 0 {
+                params.push(format!("film-grain={}", self.film_grain.min(50)));
+                params.push(format!("film-grain-denoise={}", u8::from(self.grain_denoise)));
+            }
+            if !params.is_empty() {
+                a.push("-svtav1-params".to_string());
+                a.push(params.join(":"));
+            }
+        }
+        a.extend(split_options(&self.extra_video));
+        a
+    }
+
     pub fn normalize(&mut self) -> bool {
         let mut changed = false;
         let vc = self.container.video_codecs();
@@ -464,6 +560,7 @@ impl EncodeSettings {
         self.bit_depth = if self.bit_depth >= 10 && self.video_codec.can_ten_bit() { 10 } else { 8 };
         self.video_kbps = self.video_kbps.clamp(50, 200_000);
         self.target_mb = self.target_mb.clamp(1, 200_000);
+        self.film_grain = self.film_grain.min(50);
         self.two_pass = self.two_pass && self.rate != RateMode::Quality && self.video_codec.can_two_pass();
         self.filters.normalize();
         changed

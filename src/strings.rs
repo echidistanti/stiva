@@ -51,6 +51,17 @@ pub const HARDWARE_NOTE: &str =
 pub const VIDEO_QUALITY_HINT: &str = "Lower is better and bigger. Around 18 looks like the source, 28 is small.";
 pub const VIDEO_SPEED: &str = "Speed";
 pub const VIDEO_SPEED_HINT: &str = "Slower takes longer and makes a smaller file at the same quality.";
+pub const SVT_TUNE: &str = "Tune";
+pub const SVT_TUNE_HINT: &str = "What the encoder aims at. Visual quality is for watching; PSNR and SSIM are for measuring.";
+pub const FILM_GRAIN: &str = "Film grain";
+pub const FILM_GRAIN_OFF: &str = "Off";
+pub const FILM_GRAIN_HINT: &str = "Leaves the grain out of the file and makes it again when playing: much smaller for grainy film. 4 to 10 suits most; the player must support AV1 film grain.";
+pub const GRAIN_DENOISE: &str = "Take the grain out before encoding";
+pub const EXTRA_VIDEO: &str = "Extra options";
+pub const EXTRA_VIDEO_HINT: &str =
+    "For ffmpeg, as on its command line, after the options above (later ones win). Wrong ones make the encode fail; the log says why.";
+pub const EXTRA_VIDEO_EXAMPLE: &str = "e.g. -svtav1-params fast-decode=1";
+pub const AV1_HW_NOTE: &str = "Tune and film grain belong to the software encoder (SVT-AV1). A graphics chip keeps its own settings: pass any your card has in Extra options.";
 pub const NO_VIDEO_HERE: &str = "This format has no video.";
 pub const NOT_IN_FFMPEG: &str = "not in this ffmpeg";
 pub const AUDIO_CODEC: &str = "Codec";

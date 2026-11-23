@@ -209,6 +209,7 @@ fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
             // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
             args.extend(["-tag:v".to_string(), "hvc1".to_string()]);
         }
+        args.extend(st.video_extras());
         o(&args.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
@@ -675,6 +676,49 @@ mod tests {
     }
 
     #[test]
+    fn svt_av1_tune_and_film_grain_and_the_users_own_options() {
+        use crate::model::SvtTune;
+        let mut a = EncodeSettings::default();
+        a.set_video_codec(VideoCodec::SvtAv1);
+        let plain = line(&job(a.clone()));
+        assert!(!plain.contains("-svtav1-params"), "nothing is added unless asked for: {plain}");
+        a.film_grain = 8;
+        let l = line(&job(a.clone()));
+        assert!(l.contains("-pix_fmt yuv420p -svtav1-params film-grain=8:film-grain-denoise=1 "), "{l}");
+        a.grain_denoise = false;
+        a.svt_tune = SvtTune::Ssim;
+        a.extra_video = "-g 48 -metadata:s:v:0 \"title=my clip\"".into();
+        let l = line(&job(a.clone()));
+        assert!(l.contains("-svtav1-params tune=2:film-grain=8:film-grain-denoise=0 -g 48 -metadata:s:v:0 title=my clip "), "{l}");
+        assert!(
+            build_args(&job(a.clone())).iter().any(|x| x == "title=my clip"),
+            "a quoted pair stays one argument, so a space in it cannot start a new option"
+        );
+        // The grain and the tune are the SVT-AV1 encoder's: other codecs ignore them, but not the free options.
+        let mut x = EncodeSettings { film_grain: 20, svt_tune: SvtTune::Psnr, extra_video: "-tune grain".into(), ..Default::default() };
+        x.set_video_codec(VideoCodec::X264);
+        let l = line(&job(x));
+        assert!(!l.contains("svtav1") && !l.contains("film-grain") && l.contains("-pix_fmt yuv420p -tune grain "), "{l}");
+        // The first pass of two sees the same video options as the second.
+        let mut b = EncodeSettings { rate: RateMode::Bitrate, two_pass: true, film_grain: 5, ..Default::default() };
+        b.set_video_codec(VideoCodec::X265);
+        b.extra_video = "-x265-params no-sao=1".into();
+        let first =
+            args_for(&job(b.clone()), Pass::First("p")).iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(first.contains("-x265-params no-sao=1"), "{first}");
+    }
+
+    #[test]
+    fn options_are_split_like_a_command_line() {
+        use crate::model::split_options;
+        assert!(split_options("").is_empty() && split_options("   ").is_empty());
+        assert_eq!(split_options("-g 48  -bf 3"), ["-g", "48", "-bf", "3"]);
+        assert_eq!(split_options(r#"-metadata "title=a b" -x 'c d'"#), ["-metadata", "title=a b", "-x", "c d"]);
+        assert_eq!(split_options(r#"-a "" -b"#), ["-a", "", "-b"], "an empty pair of quotes is an empty word");
+        assert_eq!(split_options(r#"-a "open end"#), ["-a", "open end"], "an unclosed quote runs to the end");
+    }
+
+    #[test]
     fn audio_only_has_no_video_and_no_chapters() {
         let mut s = EncodeSettings { container: Container::Mp3, ..Default::default() };
         s.normalize();
@@ -832,6 +876,7 @@ mod tests {
             ("mp4-x265", Container::Mp4, VideoCodec::X265, AudioCodec::Aac, "hevc"),
             ("webm-vp9", Container::WebM, VideoCodec::Vp9, AudioCodec::Opus, "vp9"),
             ("mkv-av1", Container::Mkv, VideoCodec::SvtAv1, AudioCodec::Flac, "av1"),
+            ("mkv-av1-grain", Container::Mkv, VideoCodec::SvtAv1, AudioCodec::Opus, "av1"),
             ("mp4-copy", Container::Mp4, VideoCodec::X264, AudioCodec::Copy, "h264"),
         ];
         for (name, container, vc, ac, want_codec) in cases {
@@ -839,6 +884,11 @@ mod tests {
             s.set_video_codec(vc);
             s.set_audio_codec(ac);
             s.preset = vc.presets()[vc.presets().len() - 1].to_string(); // the fastest, to keep the test short
+            if name == "mkv-av1-grain" {
+                s.film_grain = 8;
+                s.svt_tune = crate::model::SvtTune::Ssim;
+                s.extra_video = "-g 48".into();
+            }
             s.normalize();
             let out = dir.join(format!("{name}.{}", container.ext()));
             let job = Job { src: src.clone(), audio_sel: vec![0, 1], sub_sel: vec![], settings: s, range: None, out: out.clone() };

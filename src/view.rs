@@ -5,7 +5,7 @@ use crate::after::WhenDone;
 use crate::app::{self, App, Last, Page, QueueTab, Report, Run, Setup, Source, Src, Tab};
 use crate::encode::Job;
 use crate::filters::{self, Crop, Deinterlace, Filters, Margins, Rotate, Strength};
-use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, RateMode, SIZE_STEPS};
+use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, RateMode, SIZE_STEPS, SvtTune, VideoCodec};
 use crate::probe::{channel_name, human_bitrate, human_change, human_duration, human_size};
 use crate::queue::{self, State};
 use crate::settings::{DestMode, OnExists};
@@ -567,9 +567,39 @@ impl App {
                             });
                             ui.label(muted(s::VIDEO_SPEED_HINT));
                         });
+                        if enc.video_codec == VideoCodec::SvtAv1 {
+                            setting_row(ui, s::SVT_TUNE, |ui| {
+                                egui::ComboBox::from_id_salt("svt_tune").selected_text(enc.svt_tune.label()).width(190.0).show_ui(
+                                    ui,
+                                    |ui| {
+                                        for t in SvtTune::ALL {
+                                            ui.selectable_value(&mut enc.svt_tune, t, t.label());
+                                        }
+                                    },
+                                );
+                                ui.label(muted(s::SVT_TUNE_HINT));
+                            });
+                            setting_row(ui, s::FILM_GRAIN, |ui| {
+                                ui.add(
+                                    egui::Slider::new(&mut enc.film_grain, 0..=50)
+                                        .custom_formatter(|v, _| if v < 1.0 { s::FILM_GRAIN_OFF.to_string() } else { format!("{v:.0}") }),
+                                );
+                                ui.label(muted(s::FILM_GRAIN_HINT));
+                                if enc.film_grain > 0 {
+                                    ui.checkbox(&mut enc.grain_denoise, s::GRAIN_DENOISE);
+                                }
+                            });
+                        }
+                        setting_row(ui, s::EXTRA_VIDEO, |ui| {
+                            ui.add(egui::TextEdit::singleline(&mut enc.extra_video).hint_text(s::EXTRA_VIDEO_EXAMPLE).desired_width(300.0));
+                            ui.label(muted(s::EXTRA_VIDEO_HINT));
+                        });
                         if enc.video_codec.is_hardware() {
                             ui.add_space(4.0);
                             ui.label(muted(s::HARDWARE_NOTE));
+                            if enc.video_codec.is_av1() {
+                                ui.label(muted(s::AV1_HW_NOTE));
+                            }
                         }
                     }
                 }

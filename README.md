@@ -21,7 +21,7 @@ I wanted a converter that stays close to ffmpeg without making me write command 
 ## Features
 
 - **Formats in and out.** Reads anything ffmpeg reads. Writes MP4, MKV, WebM, MP3, M4A, Opus and FLAC.
-- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. Stiva tests each encoder on the machine and shows only those that really start.
+- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. SVT-AV1 has tune and film grain; every encoder, hardware included, takes extra ffmpeg options. Stiva tests each encoder on the machine and shows only those that really start.
 - **Audio.** AAC, MP3, Opus, Vorbis, AC-3, FLAC, copy or none; mono, stereo or 5.1; choice of tracks.
 - **Picture.** Size limit, crop (auto or manual), rotate, flip, deinterlace, detelecine, denoise, sharpen, grayscale and a free ffmpeg filter field.
 - **Subtitles, chapters, time range.** Keep the tracks you want, chapters travel in MKV, encode only a stretch of the file.
