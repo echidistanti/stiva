@@ -25,17 +25,26 @@ jobs:
           path: target/release/stiva.exe
           retention-days: 7
 
-  # The tests that run a real ffmpeg need one with the usual encoders; Ubuntu 24.04 has it.
+  # The tests that run a real ffmpeg use the build Stiva itself downloads on Linux: the newest release branch from
+  # FFmpeg-Builds, checked against its SHA-256 as Stiva does.
   linux-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Get ffmpeg
+        run: |
+          base=https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest
+          curl -fsSL --retry 3 "$base/checksums.sha256" -o checksums.sha256
+          name=$(awk '{print $2}' checksums.sha256 | grep -E '^ffmpeg-n[0-9]+\.[0-9]+-latest-linux64-gpl-[0-9]+\.[0-9]+\.tar\.xz$' | sort -V | tail -1)
+          echo "using $name"
+          curl -fsSL --retry 3 "$base/$name" -o ffmpeg.tar.xz
+          echo "$(grep " $name\$" checksums.sha256 | cut -d' ' -f1)  ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf ffmpeg.tar.xz -C "$RUNNER_TEMP/ffmpeg" --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          echo "STIVA_FFDIR=$RUNNER_TEMP/ffmpeg" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --locked
-        env:
-          STIVA_FFDIR: /usr/bin
 
   # Built on the oldest Ubuntu still offered, so the AppImage runs on anything newer than that.
   linux-appimage:
