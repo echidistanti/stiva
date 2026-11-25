@@ -81,7 +81,7 @@ I use Stiva on my own Windows 11 computer (AMD Ryzen, Radeon graphics) and have 
 
 **Not tried on real hardware: NVIDIA NVENC, Intel QSV and hardware AV1.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
 
-**Linux is new.** I build and test it in a headless Linux session: the automated tests, the window under a virtual display, the AppImage packaging, the ffmpeg download and its checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have not yet used the AppImage on a real desktop, so *Sleep* and *Shut down* on Linux, Wayland, and every GPU there are untried.
+**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have not yet used the AppImage on a real desktop or run the download from inside the program, so those, *Sleep* and *Shut down* on Linux, Wayland, and every GPU there are untried.
 
 About a hundred automated tests run on Linux, including real ffmpeg encodes that check the command lines produce files with the right streams, size and length.
 
