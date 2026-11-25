@@ -38,6 +38,8 @@ windows-registry = "0.6"
 # the file dialogs (rfd) already bring. libc is for pausing ffmpeg.
 zbus = "5"
 libc = "0.2"
+# To ask for the X11 backend; the same version eframe already uses, with the X11 feature it already turns on.
+winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [build-dependencies]
 winresource = "0.1.34"

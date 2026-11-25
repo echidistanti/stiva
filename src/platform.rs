@@ -32,6 +32,21 @@ pub fn reveal(path: &std::path::Path) {
     }
 }
 
+/// Whether to open the window through X11 even on a Wayland desktop. Dropping a file onto the window only works
+/// there: the window library hands over dropped files through X11 alone, so under plain Wayland (COSMIC has no
+/// other session) the drop never arrives. XWayland carries it from the file manager. `STIVA_WAYLAND=1` keeps
+/// native Wayland, which draws sharper on a scaled screen.
+#[cfg(not(windows))]
+pub fn use_x11() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    x11_wanted(set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET"), set("DISPLAY"), set("STIVA_WAYLAND"))
+}
+
+#[cfg(not(windows))]
+fn x11_wanted(wayland_session: bool, x11_available: bool, opted_out: bool) -> bool {
+    wayland_session && x11_available && !opted_out
+}
+
 /// The progress shown on Stiva's button in the taskbar.
 #[derive(Default)]
 pub struct Taskbar {
@@ -335,6 +350,15 @@ mod tests {
         assert!(xml.contains("<text>a&lt;b&gt;&amp;c</text>"));
         assert!(xml.contains("&quot;x&quot; &apos;y&apos;</text>"), "{xml}");
         assert_eq!(xml.matches("<text>").count(), 2, "nothing a file name holds can open a new element");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn x11_is_chosen_only_on_wayland_with_xwayland_and_unless_opted_out() {
+        assert!(x11_wanted(true, true, false), "Wayland with XWayland: X11, so that dropped files arrive");
+        assert!(!x11_wanted(true, false, false), "no X server to go through: stay on Wayland");
+        assert!(!x11_wanted(false, true, false), "a plain X11 session needs no detour");
+        assert!(!x11_wanted(true, true, true), "STIVA_WAYLAND keeps native Wayland");
     }
 
     #[test]

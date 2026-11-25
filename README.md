@@ -81,7 +81,7 @@ I use Stiva on my own Windows 11 computer (AMD Ryzen, Radeon graphics) and have 
 
 **Not tried on real hardware: NVIDIA NVENC, Intel QSV, VA-API and hardware AV1.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
 
-**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have not yet used the AppImage on a real desktop or run the download from inside the program, so those, *Sleep* and *Shut down* on Linux, Wayland, and every GPU there are untried.
+**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have since run the AppImage on one real desktop, Fedora with COSMIC on an AMD integrated GPU: it starts, downloads ffmpeg from inside the program and encodes with VA-API. *Sleep* and *Shut down* on Linux, other desktops and distributions, and every other GPU are untried.
 
 About a hundred automated tests run on Linux, including real ffmpeg encodes that check the command lines produce files with the right streams, size and length.
 
@@ -90,6 +90,8 @@ About a hundred automated tests run on Linux, including real ffmpeg encodes that
 - **SmartScreen or Defender warns, or removes the exe.** Stiva is new and unsigned, and it downloads and unpacks a program, which heuristics look at. SmartScreen: *More info → Run anyway*. Defender: *Protection history → restore → Allow on device*, then report a false positive at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission). The source is here and `cargo build --release` produces the same program.
 - **ffmpeg will not download.** Check proxy or antivirus and retry, or point Stiva to your own ffmpeg folder (it needs `ffmpeg` and `ffprobe`, with `.exe` on Windows).
 - **A hardware encoder is missing, or "10-bit did not pass its test".** The driver or card does not offer it; `logs/encoders.txt` shows what each test said. On Linux Stiva offers NVENC, Intel QSV where oneVPL is installed, and VA-API for AMD and Intel graphics. VA-API needs `libva` and your distribution's video driver (on Debian and Ubuntu `libva2` and `mesa-va-drivers`, or `intel-media-va-driver` for newer Intel); the ffmpeg Stiva downloads loads them from the system. AV1 encoding needs a recent chip (RDNA3 or Arc), so older ones show H.264 and HEVC only.
+- **Only AV1 shows up under VA-API on Fedora (or openSUSE).** Their Mesa is built without H.264 and H.265, and AV1 is left. `vainfo | grep -i enc` shows only `VAProfileAV1Profile0`. On Fedora install the full driver from RPM Fusion Free: `sudo dnf install mesa-va-drivers-freeworld` (Fedora 44), or `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing` (Fedora 43 and earlier). Then log out and in again.
+- **Dropping a file on the window does nothing (Linux).** On Wayland the window library does not pass dropped files on; X11 does. So on a Wayland desktop that has XWayland (COSMIC, GNOME, KDE) Stiva opens through X11, and starts over on native Wayland if that fails. If you want native Wayland, which is sharper on a scaled screen, start Stiva with `STIVA_WAYLAND=1`; *Open file* always works.
 - **The AppImage does not start (Linux).** Most often FUSE 2 is missing: install `libfuse2` (`libfuse2t64` on Ubuntu 24.04), or run it as `./stiva-<version>-linux-x86_64.AppImage --appimage-extract-and-run`. If a file dialog never opens, your desktop has no `xdg-desktop-portal`; install the one for it.
 - **The system's ffmpeg lacks an encoder (Linux).** Distributions sometimes build ffmpeg without x264, x265 or SVT-AV1. *Options → ffmpeg → Download ffmpeg* fetches the full build.
 - **An encode failed.** The job's *Log* panel starts with the exact ffmpeg command and ends with what ffmpeg objected to. *Run again* retries it.
@@ -131,7 +133,7 @@ Bug reports are welcome. Please include the Stiva version, your system (Windows 
 - Not code signed.
 - English interface only (the installer also speaks Italian).
 - Queue rows cannot be selected, so there is no `Delete` key; each row has its own remove button.
-- Linux: VA-API has no speed setting (drivers do not agree on one), no progress on the taskbar or dock, and the window is drawn by Stiva (title bar included), not by the desktop.
+- Linux: VA-API has no speed setting (drivers do not agree on one), no progress on the taskbar or dock, and the window is drawn by Stiva (title bar included), not by the desktop. On a Wayland desktop it opens through XWayland so that dropping files works, which can look soft on a fractionally scaled screen (`STIVA_WAYLAND=1` avoids that and gives up the drop).
 - Windows 11 and AMD AMF are the only system and hardware encoder I have tried.
 
 ## Credits
