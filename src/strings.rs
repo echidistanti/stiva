@@ -39,6 +39,9 @@ pub const CHOOSE_FOLDER: &str = "Choose a folder with ffmpeg";
 // Source
 pub const DROP_TITLE: &str = "Drop a video here";
 pub const DROP_BODY: &str = "or press Open file. Any video or audio file that ffmpeg can read works.";
+// Where a file cannot be dropped on the window (native Wayland), the same card without the invitation.
+pub const OPEN_TITLE: &str = "Open a video";
+pub const OPEN_BODY: &str = "Press Open file or Ctrl+O. Any video or audio file that ffmpeg can read works.";
 pub const DROP_RELEASE: &str = "Release to open it";
 pub const READING: &str = "Reading";
 pub const CLOSE_SOURCE: &str = "Close this file";
@@ -164,6 +167,7 @@ pub const TO_EDITOR: &str = "Back to the file";
 pub const TAB_QUEUED: &str = "Queued";
 pub const TAB_COMPLETED: &str = "Completed";
 pub const QUEUE_EMPTY: &str = "Nothing is waiting. Open a file, set it up and press Add to queue, or drop several files on the window.";
+pub const QUEUE_EMPTY_NO_DROP: &str = "Nothing is waiting. Open a file, set it up and press Add to queue, or choose several files at once.";
 pub const COMPLETED_EMPTY: &str = "Nothing has finished yet.";
 pub const CLEAR_COMPLETED: &str = "Clear completed";
 pub const WAITING: &str = "Waiting";

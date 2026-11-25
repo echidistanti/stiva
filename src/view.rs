@@ -6,6 +6,7 @@ use crate::app::{self, App, Last, Page, QueueTab, Report, Run, Setup, Source, Sr
 use crate::encode::Job;
 use crate::filters::{self, Crop, Deinterlace, Filters, Margins, Rotate, Strength};
 use crate::model::{AUDIO_KBPS, AudioCodec, Container, Mixdown, RateMode, SIZE_STEPS, SvtTune, VideoCodec};
+use crate::platform;
 use crate::probe::{channel_name, human_bitrate, human_change, human_duration, human_size};
 use crate::queue::{self, State};
 use crate::settings::{DestMode, OnExists};
@@ -357,8 +358,9 @@ impl App {
                     ui.add_space(14.0);
                     ui::empty_icon(ui, hovering);
                     ui.add_space(6.0);
-                    ui.label(RichText::new(if hovering { s::DROP_RELEASE } else { s::DROP_TITLE }).size(19.0).strong());
-                    ui.label(muted(s::DROP_BODY));
+                    let (title, body) = if platform::drop_works() { (s::DROP_TITLE, s::DROP_BODY) } else { (s::OPEN_TITLE, s::OPEN_BODY) };
+                    ui.label(RichText::new(if hovering { s::DROP_RELEASE } else { title }).size(19.0).strong());
+                    ui.label(muted(body));
                     ui.add_space(14.0);
                 });
             }),
@@ -1057,7 +1059,13 @@ impl App {
             .collect();
         if rows.is_empty() {
             ui.add_space(24.0);
-            ui.vertical_centered(|ui| ui.label(muted(if want_open { s::QUEUE_EMPTY } else { s::COMPLETED_EMPTY })));
+            ui.vertical_centered(|ui| {
+                ui.label(muted(if want_open {
+                    if platform::drop_works() { s::QUEUE_EMPTY } else { s::QUEUE_EMPTY_NO_DROP }
+                } else {
+                    s::COMPLETED_EMPTY
+                }))
+            });
             return;
         }
         for (id, name, summary, state, out) in rows {

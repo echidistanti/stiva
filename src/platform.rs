@@ -38,8 +38,36 @@ pub fn reveal(path: &std::path::Path) {
 /// then, so the default is native Wayland and the drop is given up.
 #[cfg(not(windows))]
 pub fn use_x11() -> bool {
-    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
-    x11_wanted(set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET"), set("DISPLAY"), set("STIVA_X11"))
+    x11_wanted(wayland_session(), env_set("DISPLAY"), env_set("STIVA_X11"))
+}
+
+#[cfg(not(windows))]
+fn env_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(not(windows))]
+fn wayland_session() -> bool {
+    env_set("WAYLAND_DISPLAY") || env_set("WAYLAND_SOCKET")
+}
+
+/// Whether a file can be dropped onto the window: always on Windows and on X11, never on a native Wayland
+/// window. The texts that invite a drop are shown only where it works.
+pub fn drop_works() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *WORKS.get_or_init(|| drop_possible(wayland_session(), use_x11()))
+    }
+}
+
+#[cfg(not(windows))]
+fn drop_possible(wayland_session: bool, x11_chosen: bool) -> bool {
+    !wayland_session || x11_chosen
 }
 
 #[cfg(not(windows))]
@@ -353,6 +381,13 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    #[test]
+    fn a_drop_works_everywhere_except_in_a_native_wayland_window() {
+        assert!(drop_possible(false, false), "an X11 session");
+        assert!(drop_possible(true, true), "Wayland, opened through X11");
+        assert!(!drop_possible(true, false), "a native Wayland window never gets the drop");
+    }
+
     #[test]
     fn x11_is_chosen_only_on_wayland_with_xwayland_and_when_asked_for() {
         assert!(x11_wanted(true, true, true), "STIVA_X11 on Wayland with XWayland: X11, so that dropped files arrive");

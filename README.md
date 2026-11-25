@@ -28,7 +28,7 @@ I wanted a converter that stays close to ffmpeg without making me write command 
 - **Presets.** Eleven built in, your own saved as small JSON files you can export and import.
 - **Queue.** Add files and leave. Pause, stop, run again. It survives closing the program.
 - **When done.** Do nothing, open the folder, close Stiva, sleep or shut down.
-- **System integration.** Drag and drop and a notification at the end on both systems. On Windows also progress on the taskbar button and a per-user installer; on Linux an AppImage.
+- **System integration.** A notification at the end on both systems, and dropping files onto the window (on Linux not in a native Wayland window, see [Troubleshooting](#troubleshooting)). On Windows also progress on the taskbar button and a per-user installer; on Linux an AppImage.
 
 <table>
 <tr>
@@ -58,7 +58,7 @@ Stiva is not code signed. See [Troubleshooting](#troubleshooting) if Windows or 
 
 ## Using it
 
-1. Open a file: *Open file*, `Ctrl+O`, drag and drop, or `stiva file.mp4` from the command line (the AppImage takes it as an argument too).
+1. Open a file: *Open file*, `Ctrl+O`, drag and drop (not in a native Wayland window), or `stiva file.mp4` from the command line (the AppImage takes it as an argument too).
 2. Pick a preset and adjust the tabs (*Container, Sizing, Filters, Video, Audio*). Every option explains itself in a line.
 3. Check *Save to* (default `Videos\Stiva` or `~/Videos/Stiva`, or next to the source).
 4. *Encode*, or *Add to queue* and open the next file. Several files at once go straight to the queue.
