@@ -21,7 +21,7 @@ I wanted a converter that stays close to ffmpeg without making me write command 
 ## Features
 
 - **Formats in and out.** Reads anything ffmpeg reads. Writes MP4, MKV, WebM, MP3, M4A, Opus and FLAC.
-- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. SVT-AV1 has tune and film grain; every encoder, hardware included, takes extra ffmpeg options. Stiva tests each encoder on the machine and shows only those that really start.
+- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware, plus VA-API for AMD and Intel graphics on Linux (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. SVT-AV1 has tune and film grain; every encoder, hardware included, takes extra ffmpeg options. Stiva tests each encoder on the machine and shows only those that really start.
 - **Audio.** AAC, MP3, Opus, Vorbis, AC-3, FLAC, copy or none; mono, stereo or 5.1; choice of tracks.
 - **Picture.** Size limit, crop (auto or manual), rotate, flip, deinterlace, detelecine, denoise, sharpen, grayscale and a free ffmpeg filter field.
 - **Subtitles, chapters, time range.** Keep the tracks you want, chapters travel in MKV, encode only a stretch of the file.
@@ -79,7 +79,7 @@ No accounts, no telemetry, no update check. The only network request is the ffmp
 
 I use Stiva on my own Windows 11 computer (AMD Ryzen, Radeon graphics) and have tried there: the first start and ffmpeg download, presets, the queue, pause and stop, 8-bit and 10-bit with x264, x265, SVT-AV1 and VP9, filters, bitrate, target size, two passes, subtitles, the notification, taskbar progress, every *When done* choice, the installer, and the **AMD AMF** encoders.
 
-**Not tried on real hardware: NVIDIA NVENC, Intel QSV and hardware AV1.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
+**Not tried on real hardware: NVIDIA NVENC, Intel QSV, VA-API and hardware AV1.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
 
 **Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have not yet used the AppImage on a real desktop or run the download from inside the program, so those, *Sleep* and *Shut down* on Linux, Wayland, and every GPU there are untried.
 
@@ -89,7 +89,7 @@ About a hundred automated tests run on Linux, including real ffmpeg encodes that
 
 - **SmartScreen or Defender warns, or removes the exe.** Stiva is new and unsigned, and it downloads and unpacks a program, which heuristics look at. SmartScreen: *More info → Run anyway*. Defender: *Protection history → restore → Allow on device*, then report a false positive at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission). The source is here and `cargo build --release` produces the same program.
 - **ffmpeg will not download.** Check proxy or antivirus and retry, or point Stiva to your own ffmpeg folder (it needs `ffmpeg` and `ffprobe`, with `.exe` on Windows).
-- **A hardware encoder is missing, or "10-bit did not pass its test".** The driver or card does not offer it; `logs/encoders.txt` shows what each test said. On Linux Stiva offers NVENC, and Intel QSV where oneVPL is installed; AMD cards and Intel graphics through VA-API are not supported yet.
+- **A hardware encoder is missing, or "10-bit did not pass its test".** The driver or card does not offer it; `logs/encoders.txt` shows what each test said. On Linux Stiva offers NVENC, Intel QSV where oneVPL is installed, and VA-API for AMD and Intel graphics. VA-API needs `libva` and your distribution's video driver (on Debian and Ubuntu `libva2` and `mesa-va-drivers`, or `intel-media-va-driver` for newer Intel); the ffmpeg Stiva downloads loads them from the system. AV1 encoding needs a recent chip (RDNA3 or Arc), so older ones show H.264 and HEVC only.
 - **The AppImage does not start (Linux).** Most often FUSE 2 is missing: install `libfuse2` (`libfuse2t64` on Ubuntu 24.04), or run it as `./stiva-<version>-linux-x86_64.AppImage --appimage-extract-and-run`. If a file dialog never opens, your desktop has no `xdg-desktop-portal`; install the one for it.
 - **The system's ffmpeg lacks an encoder (Linux).** Distributions sometimes build ffmpeg without x264, x265 or SVT-AV1. *Options → ffmpeg → Download ffmpeg* fetches the full build.
 - **An encode failed.** The job's *Log* panel starts with the exact ffmpeg command and ends with what ffmpeg objected to. *Run again* retries it.
@@ -131,7 +131,7 @@ Bug reports are welcome. Please include the Stiva version, your system (Windows 
 - Not code signed.
 - English interface only (the installer also speaks Italian).
 - Queue rows cannot be selected, so there is no `Delete` key; each row has its own remove button.
-- Linux: no VA-API encoders yet, no progress on the taskbar or dock, and the window is drawn by Stiva (title bar included), not by the desktop.
+- Linux: VA-API has no speed setting (drivers do not agree on one), no progress on the taskbar or dock, and the window is drawn by Stiva (title bar included), not by the desktop.
 - Windows 11 and AMD AMF are the only system and hardware encoder I have tried.
 
 ## Credits

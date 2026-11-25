@@ -155,10 +155,16 @@ pub fn build_args(job: &Job) -> Vec<OsString> {
 fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
     let st = &job.settings;
     let first = matches!(pass, Pass::First(_));
+    let audio_only = st.container.audio_only();
+    let video = !audio_only && job.src.video.is_some();
     let mut a: Vec<OsString> = Vec::new();
     let mut o = |items: &[&str]| a.extend(items.iter().map(OsString::from));
 
     o(&["-hide_banner", "-nostdin", "-nostats", "-y", "-loglevel", "info"]);
+    if video && st.video_codec.is_vaapi() {
+        // The render node that passed the test encode; VA-API cannot pick one by itself.
+        o(&["-vaapi_device", &crate::caps::vaapi_device()]);
+    }
     if let Some((start, _)) = job.range {
         if start > 0.0 {
             o(&["-ss", &secs(start)]);
@@ -172,8 +178,6 @@ fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
         o(&["-t", &secs(end - start)]);
     }
 
-    let audio_only = st.container.audio_only();
-    let video = !audio_only && job.src.video.is_some();
     let keep = if first { vec![] } else { job.kept_audio() };
     let subs = if first { vec![] } else { job.kept_subs() };
 
@@ -195,7 +199,12 @@ fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
 
     if video {
         let codec = st.video_codec;
-        if let Some(chain) = st.filters.chain(st.max_size.map(scale_filter)) {
+        // A graphics chip takes the picture in its own memory, so the upload filter closes the chain.
+        let chain = match (st.filters.chain(st.max_size.map(scale_filter)), codec.upload_filter(st.bit_depth)) {
+            (Some(c), Some(up)) => Some(format!("{c},{up}")),
+            (c, up) => c.or_else(|| up.map(String::from)),
+        };
+        if let Some(chain) = chain {
             o(&["-vf", &chain]);
         }
         let rate = job.video_rate().unwrap_or(Rate::Quality(st.crf));
@@ -676,6 +685,42 @@ mod tests {
         let mut a = EncodeSettings::default();
         a.set_video_codec(VideoCodec::SvtAv1);
         assert!(line(&job(a)).contains("-c:v libsvtav1 -preset 6 -crf 30"));
+    }
+
+    #[test]
+    fn vaapi_names_its_device_and_ends_the_filter_chain_with_the_upload() {
+        let mut s = EncodeSettings::default();
+        s.set_video_codec(VideoCodec::HevcVaapi);
+        let l = line(&job(s.clone()));
+        assert!(l.starts_with("-hide_banner -nostdin -nostats -y -loglevel info -vaapi_device /dev/dri/renderD"), "{l}");
+        assert!(l.contains(" -i /in/film.avi "), "{l}");
+        assert!(l.contains("-vf format=nv12,hwupload "), "no other filter, only the upload: {l}");
+        assert!(l.contains("-c:v hevc_vaapi -rc_mode CQP -qp 28 -tag:v hvc1 "), "{l}");
+        assert!(!l.contains("-pix_fmt") && !l.contains("-preset"), "{l}");
+
+        // The user's own filters run on the CPU first; the picture goes up last.
+        s.max_size = Some((640, 360));
+        let l = line(&job(s.clone()));
+        let chain = l.split("-vf ").nth(1).and_then(|r| r.split(' ').next()).unwrap_or_default();
+        assert!(chain.starts_with("scale=") && chain.ends_with(",format=nv12,hwupload"), "{chain}");
+
+        s.bit_depth = 10;
+        assert!(line(&job(s.clone())).contains("format=p010le,hwupload"));
+        s.rate = RateMode::Bitrate;
+        s.video_kbps = 2500;
+        assert!(line(&job(s)).contains("-c:v hevc_vaapi -b:v 2500k -maxrate 3750k"));
+    }
+
+    #[test]
+    fn only_vaapi_video_gets_a_device() {
+        let l = line(&job(EncodeSettings::default()));
+        assert!(!l.contains("-vaapi_device") && !l.contains("hwupload"), "{l}");
+        // A sound-only file never touches the graphics chip, whatever codec was chosen before.
+        let mut s = EncodeSettings::default();
+        s.set_video_codec(VideoCodec::H264Vaapi);
+        s.container = Container::Mp3;
+        let l = line(&job(s));
+        assert!(!l.contains("-vaapi_device") && !l.contains("hwupload"), "{l}");
     }
 
     #[test]

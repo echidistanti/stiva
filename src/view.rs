@@ -626,14 +626,16 @@ impl App {
                                 ui.checkbox(&mut enc.two_pass, s::TWO_PASS_HINT);
                             });
                         }
-                        setting_row(ui, s::VIDEO_SPEED, |ui| {
-                            egui::ComboBox::from_id_salt("preset").selected_text(enc.preset.clone()).width(190.0).show_ui(ui, |ui| {
-                                for p in enc.video_codec.presets() {
-                                    ui.selectable_value(&mut enc.preset, p.to_string(), *p);
-                                }
+                        if enc.video_codec.has_speed() {
+                            setting_row(ui, s::VIDEO_SPEED, |ui| {
+                                egui::ComboBox::from_id_salt("preset").selected_text(enc.preset.clone()).width(190.0).show_ui(ui, |ui| {
+                                    for p in enc.video_codec.presets() {
+                                        ui.selectable_value(&mut enc.preset, p.to_string(), *p);
+                                    }
+                                });
+                                ui.label(muted(s::VIDEO_SPEED_HINT));
                             });
-                            ui.label(muted(s::VIDEO_SPEED_HINT));
-                        });
+                        }
                         if enc.video_codec == VideoCodec::SvtAv1 {
                             setting_row(ui, s::SVT_TUNE, |ui| {
                                 egui::ComboBox::from_id_salt("svt_tune").selected_text(enc.svt_tune.label()).width(190.0).show_ui(

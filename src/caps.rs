@@ -5,7 +5,47 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Where VA-API encodes when no render node has been tried yet.
+const FIRST_RENDER_NODE: &str = "/dev/dri/renderD128";
+
+/// The render node the last probe found working. A global because the queue's jobs are saved to disk
+/// and a graphics chip belongs to this PC, not to a job.
+static VAAPI_DEVICE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The render node to give ffmpeg for VA-API.
+pub fn vaapi_device() -> String {
+    VAAPI_DEVICE.lock().ok().and_then(|d| d.clone()).unwrap_or_else(|| FIRST_RENDER_NODE.into())
+}
+
+/// The graphics devices that can encode, in order: `/dev/dri/renderD128`, `renderD129`...
+fn render_nodes() -> Vec<String> {
+    let mut nodes: Vec<String> = std::fs::read_dir("/dev/dri")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("renderD"))
+        .map(|n| format!("/dev/dri/{n}"))
+        .collect();
+    nodes.sort();
+    nodes
+}
+
+/// Picks the node on which most of `listed` pass a test; the first one wins a tie. With none passing, the first
+/// node is kept so the logged reasons are those of the usual device.
+fn pick_node(nodes: &[String], listed: &[VideoCodec], works: &(impl Fn(VideoCodec, &str) -> Result<(), String> + Sync)) -> String {
+    let mut best: Option<(&String, usize)> = None;
+    for node in nodes {
+        let passed = run_tests(listed, &|c| works(c, node)).iter().filter(|(_, r)| r.is_ok()).count();
+        if passed > 0 && best.is_none_or(|(_, b)| passed > b) {
+            best = Some((node, passed));
+        }
+    }
+    best.map(|(n, _)| n.clone()).or_else(|| nodes.first().cloned()).unwrap_or_else(|| FIRST_RENDER_NODE.into())
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Capabilities {
@@ -20,6 +60,8 @@ pub struct Capabilities {
     /// Hardware encoders that took a test encode steered by a bitrate, and those that did not.
     bitrate: HashSet<String>,
     bitrate_rejected: Vec<(String, String)>,
+    /// The render node the VA-API encoders were tried on, when this ffmpeg has any.
+    pub vaapi_device: Option<String>,
 }
 
 /// Runs `works` for each codec, side by side, as failing ones take a moment.
@@ -107,6 +149,9 @@ impl Capabilities {
     /// folder so a missing option can be traced.
     pub fn report(&self) -> String {
         let mut out = format!("{}\n\n", self.version);
+        if let Some(d) = &self.vaapi_device {
+            out += &format!("VA-API device: {d}\n\n");
+        }
         for c in VideoCodec::ALL {
             let name = c.encoder();
             if self.has(name) {
@@ -150,19 +195,37 @@ impl Capabilities {
         if caps.encoders.is_empty() {
             return Err("ffmpeg did not list any encoder".into());
         }
-        caps.keep_working(|c| test_encode(ffmpeg, c, 8, false));
-        caps.find_ten_bit(|c| test_encode(ffmpeg, c, 10, false));
-        caps.find_bitrate(|c| test_encode(ffmpeg, c, 8, true));
+        let vaapi: Vec<VideoCodec> = VideoCodec::ALL.into_iter().filter(|c| c.is_vaapi() && caps.has(c.encoder())).collect();
+        let device = if vaapi.is_empty() {
+            FIRST_RENDER_NODE.to_string()
+        } else {
+            let node = pick_node(&render_nodes(), &vaapi, &|c, node| test_encode(ffmpeg, c, 8, false, node));
+            caps.vaapi_device = Some(node.clone());
+            if let Ok(mut d) = VAAPI_DEVICE.lock() {
+                *d = Some(node.clone());
+            }
+            node
+        };
+        caps.keep_working(|c| test_encode(ffmpeg, c, 8, false, &device));
+        caps.find_ten_bit(|c| test_encode(ffmpeg, c, 10, false, &device));
+        caps.find_bitrate(|c| test_encode(ffmpeg, c, 8, true, &device));
         Ok(caps)
     }
 }
 
 /// Encodes a few black frames with the encoder, using the options a real encode would use.
 /// The error is the first lines ffmpeg printed, which name the real cause.
-fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool) -> Result<(), String> {
+fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool, device: &str) -> Result<(), String> {
     let rate = if bitrate { Rate::Kbps(1000) } else { Rate::Quality(codec.default_crf()) };
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=25:d=0.5", "-frames:v", "8"]);
+    cmd.args(["-hide_banner", "-v", "error", "-nostdin"]);
+    if codec.is_vaapi() {
+        cmd.args(["-vaapi_device", device]);
+    }
+    cmd.args(["-f", "lavfi", "-i", "color=c=black:s=640x360:r=25:d=0.5", "-frames:v", "8"]);
+    if let Some(upload) = codec.upload_filter(bits) {
+        cmd.args(["-vf", upload]);
+    }
     cmd.args(codec.args(rate, codec.default_preset(), bits));
     cmd.args(["-f", "null", "-"]);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
@@ -224,6 +287,38 @@ mod tests {
         let report = c.report();
         assert!(report.contains("libx265 10-bit: works") && report.contains("hevc_amf 10-bit: not usable here: no 10-bit here"));
         assert!(report.contains("h264_amf 10-bit: not offered"));
+    }
+
+    #[test]
+    fn the_render_node_with_most_working_vaapi_encoders_is_picked() {
+        use VideoCodec::{Av1Vaapi, H264Vaapi, HevcVaapi};
+        const A: &str = "/dev/dri/renderD128";
+        const B: &str = "/dev/dri/renderD129";
+        const C: &str = "/dev/dri/renderD130";
+        let nodes: Vec<String> = [A, B, C].map(String::from).to_vec();
+        let listed = [H264Vaapi, HevcVaapi, Av1Vaapi];
+        // Which codecs pass on which node.
+        let pick = |good: Vec<(&str, Vec<VideoCodec>)>| {
+            pick_node(&nodes, &listed, &|c, node| {
+                if good.iter().any(|(n, ok)| *n == node && ok.contains(&c)) { Ok(()) } else { Err("no".to_string()) }
+            })
+        };
+        // The second chip does more than the first.
+        assert_eq!(pick(vec![(A, vec![H264Vaapi]), (B, listed.to_vec())]), B);
+        // A tie goes to the first node that passes.
+        assert_eq!(pick(vec![(B, vec![H264Vaapi]), (C, vec![HevcVaapi])]), B);
+        // Nothing works anywhere: the first node stays, so the reasons logged are its own.
+        assert_eq!(pick(vec![]), A);
+        // No render node at all: the usual name, which ffmpeg will say it cannot open.
+        assert_eq!(pick_node(&[], &listed, &|_, _| Err("no".to_string())), FIRST_RENDER_NODE);
+    }
+
+    #[test]
+    fn the_vaapi_device_is_named_in_the_report() {
+        let mut caps = Capabilities::parse(LISTING, "ffmpeg 7.1");
+        assert!(!caps.report().contains("VA-API device"));
+        caps.vaapi_device = Some("/dev/dri/renderD129".into());
+        assert!(caps.report().contains("VA-API device: /dev/dri/renderD129\n"), "{}", caps.report());
     }
 
     #[test]

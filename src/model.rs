@@ -63,10 +63,11 @@ impl Container {
     pub fn video_codecs(self) -> &'static [VideoCodec] {
         use VideoCodec::*;
         match self {
-            Container::Mp4 | Container::Mkv => {
-                &[X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv]
-            }
-            Container::WebM => &[Vp9, SvtAv1, Av1Amf, Av1Nvenc, Av1Qsv],
+            Container::Mp4 | Container::Mkv => &[
+                X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv, H264Vaapi,
+                HevcVaapi, Av1Vaapi,
+            ],
+            Container::WebM => &[Vp9, SvtAv1, Av1Amf, Av1Nvenc, Av1Qsv, Av1Vaapi],
             _ => &[],
         }
     }
@@ -188,12 +189,19 @@ pub enum VideoCodec {
     H264Qsv,
     HevcQsv,
     Av1Qsv,
+    // VA-API, which is how the AMD and Intel graphics chips encode on Linux.
+    H264Vaapi,
+    HevcVaapi,
+    Av1Vaapi,
 }
 
 impl VideoCodec {
-    pub const ALL: [VideoCodec; 13] = {
+    pub const ALL: [VideoCodec; 16] = {
         use VideoCodec::*;
-        [X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv]
+        [
+            X264, X265, SvtAv1, Vp9, H264Amf, HevcAmf, Av1Amf, H264Nvenc, HevcNvenc, Av1Nvenc, H264Qsv, HevcQsv, Av1Qsv, H264Vaapi,
+            HevcVaapi, Av1Vaapi,
+        ]
     };
 
     pub fn label(self) -> &'static str {
@@ -211,6 +219,9 @@ impl VideoCodec {
             VideoCodec::H264Qsv => "H.264 (Intel QSV)",
             VideoCodec::HevcQsv => "H.265 (Intel QSV)",
             VideoCodec::Av1Qsv => "AV1 (Intel QSV)",
+            VideoCodec::H264Vaapi => "H.264 (VA-API)",
+            VideoCodec::HevcVaapi => "H.265 (VA-API)",
+            VideoCodec::Av1Vaapi => "AV1 (VA-API)",
         }
     }
 
@@ -230,6 +241,9 @@ impl VideoCodec {
             VideoCodec::H264Qsv => "h264_qsv",
             VideoCodec::HevcQsv => "hevc_qsv",
             VideoCodec::Av1Qsv => "av1_qsv",
+            VideoCodec::H264Vaapi => "h264_vaapi",
+            VideoCodec::HevcVaapi => "hevc_vaapi",
+            VideoCodec::Av1Vaapi => "av1_vaapi",
         }
     }
 
@@ -239,7 +253,22 @@ impl VideoCodec {
 
     /// Whether 10-bit is worth testing: H.264 on a graphics chip is 8-bit only in practice.
     pub fn can_ten_bit(self) -> bool {
-        !matches!(self, VideoCodec::H264Amf | VideoCodec::H264Nvenc | VideoCodec::H264Qsv)
+        !matches!(self, VideoCodec::H264Amf | VideoCodec::H264Nvenc | VideoCodec::H264Qsv | VideoCodec::H264Vaapi)
+    }
+
+    /// VA-API takes its pictures in the graphics chip's own memory, so it needs a device and an upload step.
+    pub fn is_vaapi(self) -> bool {
+        matches!(self, VideoCodec::H264Vaapi | VideoCodec::HevcVaapi | VideoCodec::Av1Vaapi)
+    }
+
+    /// Whether the encoder has a speed setting to offer. VA-API has none that every driver understands.
+    pub fn has_speed(self) -> bool {
+        !self.is_vaapi()
+    }
+
+    /// The filter that moves the picture to the graphics chip, put last in the chain; none for the others.
+    pub fn upload_filter(self, bits: u8) -> Option<&'static str> {
+        self.is_vaapi().then_some(if bits >= 10 { "format=p010le,hwupload" } else { "format=nv12,hwupload" })
     }
 
     /// Two passes need the encoder to keep statistics between runs, which the graphics chips cannot.
@@ -248,20 +277,20 @@ impl VideoCodec {
     }
 
     pub fn is_av1(self) -> bool {
-        matches!(self, VideoCodec::SvtAv1 | VideoCodec::Av1Amf | VideoCodec::Av1Nvenc | VideoCodec::Av1Qsv)
+        matches!(self, VideoCodec::SvtAv1 | VideoCodec::Av1Amf | VideoCodec::Av1Nvenc | VideoCodec::Av1Qsv | VideoCodec::Av1Vaapi)
     }
 
     pub fn is_hevc(self) -> bool {
-        matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv)
+        matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv | VideoCodec::HevcVaapi)
     }
 
     /// Lowest and highest value of the quality scale: lower is better and bigger.
     pub fn crf_range(self) -> (u32, u32) {
         use VideoCodec::*;
         match self {
-            X264 | X265 | H264Amf | HevcAmf | H264Nvenc | HevcNvenc | Av1Nvenc => (0, 51),
+            X264 | X265 | H264Amf | HevcAmf | H264Nvenc | HevcNvenc | Av1Nvenc | H264Vaapi | HevcVaapi => (0, 51),
             SvtAv1 | Vp9 => (0, 63),
-            Av1Amf => (0, 255),
+            Av1Amf | Av1Vaapi => (0, 255),
             H264Qsv | HevcQsv | Av1Qsv => (1, 51),
         }
     }
@@ -278,6 +307,9 @@ impl VideoCodec {
             H264Nvenc | HevcNvenc => 26,
             Av1Nvenc => 28,
             H264Qsv | HevcQsv | Av1Qsv => 24,
+            H264Vaapi => 26,
+            HevcVaapi => 28,
+            Av1Vaapi => 110,
         }
     }
 
@@ -291,6 +323,7 @@ impl VideoCodec {
             H264Amf | HevcAmf | Av1Amf => &["quality", "balanced", "speed"],
             H264Nvenc | HevcNvenc | Av1Nvenc => &["p7", "p6", "p5", "p4", "p3", "p2", "p1"],
             H264Qsv | HevcQsv | Av1Qsv => &["veryslow", "slower", "slow", "medium", "fast", "faster", "veryfast"],
+            H264Vaapi | HevcVaapi | Av1Vaapi => &["default"],
         }
     }
 
@@ -303,6 +336,7 @@ impl VideoCodec {
             H264Amf | HevcAmf | Av1Amf => "balanced",
             H264Nvenc | HevcNvenc | Av1Nvenc => "p5",
             H264Qsv | HevcQsv | Av1Qsv => "medium",
+            H264Vaapi | HevcVaapi | Av1Vaapi => "default",
         }
     }
 
@@ -332,6 +366,8 @@ impl VideoCodec {
                     // Variable bitrate steered by a quality level, with no bitrate cap.
                     H264Nvenc | HevcNvenc | Av1Nvenc => add(&["-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &q, "-b:v", "0"]),
                     H264Qsv | HevcQsv | Av1Qsv => add(&["-preset", preset, "-global_quality", &q]),
+                    // A constant quantizer, as with AMF. The picture is moved to the chip by a filter, see `upload_filter`.
+                    H264Vaapi | HevcVaapi | Av1Vaapi => add(&["-rc_mode", "CQP", "-qp", &q]),
                 }
             }
             (Rate::Kbps(k), _) => {
@@ -344,10 +380,14 @@ impl VideoCodec {
                         add(&["-preset", preset, "-tune", "hq", "-rc", "vbr", "-b:v", &avg, "-maxrate", &peak])
                     }
                     H264Qsv | HevcQsv | Av1Qsv => add(&["-preset", preset, "-b:v", &avg, "-maxrate", &peak]),
+                    H264Vaapi | HevcVaapi | Av1Vaapi => add(&["-b:v", &avg, "-maxrate", &peak]),
                 }
             }
         }
-        add(&["-pix_fmt", pix]);
+        // The pixel format of a VA-API picture is the chip's own; the upload filter has already set it.
+        if !self.is_vaapi() {
+            add(&["-pix_fmt", pix]);
+        }
         if self == X265 {
             add(&["-x265-params", "log-level=error"]);
         }
@@ -654,7 +694,28 @@ mod tests {
         assert!(!VideoCodec::X264.is_hardware() && VideoCodec::HevcAmf.is_hardware());
         assert!(VideoCodec::HevcQsv.is_hevc() && !VideoCodec::Av1Qsv.is_hevc());
         let webm: Vec<_> = Container::WebM.video_codecs().iter().filter(|c| c.is_hardware()).collect();
-        assert_eq!(webm, [&VideoCodec::Av1Amf, &VideoCodec::Av1Nvenc, &VideoCodec::Av1Qsv]);
+        assert_eq!(webm, [&VideoCodec::Av1Amf, &VideoCodec::Av1Nvenc, &VideoCodec::Av1Qsv, &VideoCodec::Av1Vaapi]);
+    }
+
+    #[test]
+    fn vaapi_needs_the_upload_filter_and_no_pixel_format_of_its_own() {
+        for c in [VideoCodec::H264Vaapi, VideoCodec::HevcVaapi, VideoCodec::Av1Vaapi] {
+            assert!(c.is_vaapi() && c.is_hardware() && !c.has_speed() && !c.can_two_pass(), "{c:?}");
+            assert_eq!(c.upload_filter(8), Some("format=nv12,hwupload"));
+            assert_eq!(c.upload_filter(10), Some("format=p010le,hwupload"));
+            let q = c.args(Rate::Quality(c.default_crf()), c.default_preset(), 8);
+            assert!(!q.contains(&"-pix_fmt".to_string()) && !q.contains(&"-preset".to_string()), "{c:?}: {q:?}");
+            assert_eq!(q[2..], ["-rc_mode", "CQP", "-qp", &c.default_crf().to_string()], "{c:?}");
+            let b = c.args(Rate::Kbps(2000), c.default_preset(), 10);
+            assert_eq!(b[2..], ["-b:v", "2000k", "-maxrate", "3000k"], "{c:?}");
+        }
+        assert!(VideoCodec::X264.upload_filter(8).is_none() && VideoCodec::H264Nvenc.upload_filter(10).is_none());
+        assert!(VideoCodec::X264.has_speed() && VideoCodec::H264Nvenc.has_speed());
+        assert!(VideoCodec::HevcVaapi.is_hevc() && VideoCodec::Av1Vaapi.is_av1() && !VideoCodec::H264Vaapi.can_ten_bit());
+        assert!(
+            Container::Mp4.video_codecs().contains(&VideoCodec::H264Vaapi)
+                && Container::WebM.video_codecs().contains(&VideoCodec::Av1Vaapi)
+        );
     }
 
     #[test]
@@ -677,7 +738,8 @@ mod tests {
             let b = c.args(Rate::Kbps(1500), c.default_preset(), 8).join(" ");
             assert!(b.contains("-b:v 1500k"), "{c:?}: {b}");
             assert!(!b.contains("-crf") && !b.contains("-cq ") && !b.contains("-qp_") && !b.contains("-global_quality"), "{c:?}: {b}");
-            assert!(b.contains("-pix_fmt"), "{c:?}: {b}");
+            // VA-API sets the pixel format in the upload filter instead.
+            assert_eq!(b.contains("-pix_fmt"), !c.is_vaapi(), "{c:?}: {b}");
             assert_ne!(q, b);
         }
         assert!(VideoCodec::X265.args(Rate::Kbps(900), "medium", 8).join(" ").contains("log-level=error"));
