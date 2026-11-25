@@ -35,8 +35,8 @@ fn main() -> eframe::Result {
     if let Some((rgba, width, height)) = icon::rgba() {
         viewport = viewport.with_icon(eframe::egui::IconData { rgba, width, height });
     }
-    // Dropped files reach the window only through X11, so on a Wayland desktop that has XWayland go that way
-    // first, and fall back to native Wayland if the X11 window cannot be opened.
+    // Dropped files reach the window only through X11. XWayland makes the window flash on some desktops, so
+    // that way is for whoever sets `STIVA_X11=1`; if its window cannot be opened, native Wayland takes over.
     #[cfg(not(windows))]
     if platform::use_x11() {
         use winit::platform::x11::EventLoopBuilderExtX11;
@@ -53,7 +53,7 @@ fn main() -> eframe::Result {
                 // A process gets one try at an event loop, so Wayland needs a fresh start.
                 use std::os::unix::process::CommandExt;
                 if let Ok(exe) = std::env::current_exe() {
-                    let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env("STIVA_WAYLAND", "1").exec();
+                    let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env_remove("STIVA_X11").exec();
                     eprintln!("Stiva: could not start again: {err}");
                 }
                 return Err(eframe::Error::WinitEventLoop(e));
