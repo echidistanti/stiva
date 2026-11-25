@@ -14,7 +14,24 @@ pub const OPTIONS: &str = "Options";
 
 // First run
 pub const SETUP_TITLE: &str = "Setting things up";
-pub const SETUP_BODY: &str = "Stiva converts video with ffmpeg. It is downloaded once, about 30 MB, and checked before it is used.";
+#[cfg(windows)]
+pub const SETUP_BODY: &str = "Stiva converts video with ffmpeg. It is downloaded once, about 75 MB, and checked before it is used.";
+#[cfg(not(windows))]
+pub const SETUP_BODY: &str = "Stiva converts video with ffmpeg. It is downloaded once, about 150 MB, and checked before it is used.";
+#[cfg(not(windows))]
+pub const SETUP_FOUND_TITLE: &str = "ffmpeg is already installed";
+#[cfg(not(windows))]
+pub const SETUP_FOUND_BODY: &str = "Stiva can work with the copy this system has. Builds from a distribution sometimes leave encoders out; the full build that Stiva downloads has them all.";
+#[cfg(not(windows))]
+pub const SETUP_USE_THIS: &str = "Use this one";
+#[cfg(not(windows))]
+pub const SETUP_DOWNLOAD_FULL: &str = "Download the full build (about 150 MB)";
+#[cfg(not(windows))]
+pub const SETUP_NONE_TITLE: &str = "ffmpeg is not installed";
+#[cfg(not(windows))]
+pub const SETUP_NONE_BODY: &str = "Stiva needs ffmpeg and ffprobe. It can download a full build, about 150 MB, checked before it is used. Or install ffmpeg with your package manager and press Try again.";
+#[cfg(not(windows))]
+pub const SETUP_DOWNLOAD: &str = "Download ffmpeg (about 150 MB)";
 pub const SETUP_FAILED: &str = "ffmpeg is not ready";
 pub const RETRY: &str = "Try again";
 pub const CHOOSE_FOLDER: &str = "Choose a folder with ffmpeg";
@@ -87,6 +104,12 @@ pub const OPT_EXISTS: &str = "If the file exists";
 pub const OPT_FFMPEG: &str = "ffmpeg";
 pub const OPT_FFMPEG_CUSTOM: &str = "From the folder you chose";
 pub const OPT_FFMPEG_OWN: &str = "Downloaded by Stiva";
+#[cfg(not(windows))]
+pub const OPT_FFMPEG_SYSTEM: &str = "Installed on this system";
+#[cfg(not(windows))]
+pub const OPT_USE_SYSTEM: &str = "Use the one installed on the system";
+#[cfg(not(windows))]
+pub const OPT_DOWNLOAD: &str = "Download ffmpeg";
 pub const OPT_USE_DOWNLOADED: &str = "Use the downloaded one";
 pub const OPT_UPDATE: &str = "Download again";
 pub const OPT_UPDATE_TIP: &str = "Replaces the downloaded ffmpeg with the current release";

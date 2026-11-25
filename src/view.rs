@@ -37,6 +37,9 @@ pub enum Action {
     OpenOutFolder,
     PickToolsDir,
     UseDownloaded,
+    /// Use the ffmpeg and ffprobe in this folder, which the system has.
+    #[cfg(not(windows))]
+    UseToolsDir(PathBuf),
     Redownload,
     RetrySetup,
     Dismiss,
@@ -226,21 +229,43 @@ impl App {
             label_cell(ui, s::OPT_FFMPEG);
             ui.horizontal_wrapped(|ui| {
                 let version = self.caps.as_ref().map(|c| c.version.clone()).unwrap_or_default();
+                #[cfg(windows)]
                 let origin = if self.using_custom_tools() { s::OPT_FFMPEG_CUSTOM } else { s::OPT_FFMPEG_OWN };
+                #[cfg(not(windows))]
+                let origin = match (self.using_custom_tools(), self.using_system_tools()) {
+                    (true, true) => s::OPT_FFMPEG_SYSTEM,
+                    (true, false) => s::OPT_FFMPEG_CUSTOM,
+                    _ => s::OPT_FFMPEG_OWN,
+                };
                 ui.label(muted(format!("{origin}. {version}")));
             });
             ui.end_row();
             label_cell(ui, "");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui::button(ui, s::CHOOSE_FOLDER, ui::Kind::Soft).clicked() {
                     actions.push(Action::PickToolsDir);
                 }
-                if self.set.ffmpeg_dir.is_some() && ui::button(ui, s::OPT_USE_DOWNLOADED, ui::Kind::Soft).clicked() {
+                // Outside Windows there may be no downloaded copy to go back to, and there is the system's own.
+                let downloaded = cfg!(windows) || crate::deps::downloaded().is_some();
+                #[cfg(not(windows))]
+                if let Some(sys) = self.system_tools.as_ref().filter(|_| !self.using_system_tools()) {
+                    if let Some(dir) = sys.ffmpeg.parent() {
+                        if ui::button(ui, s::OPT_USE_SYSTEM, ui::Kind::Soft).clicked() {
+                            actions.push(Action::UseToolsDir(dir.to_path_buf()));
+                        }
+                    }
+                }
+                if self.set.ffmpeg_dir.is_some() && downloaded && ui::button(ui, s::OPT_USE_DOWNLOADED, ui::Kind::Soft).clicked() {
                     actions.push(Action::UseDownloaded);
                 }
-                if self.set.ffmpeg_dir.is_none() && ui::button(ui, s::OPT_UPDATE, ui::Kind::Soft).on_hover_text(s::OPT_UPDATE_TIP).clicked()
-                {
-                    actions.push(Action::Redownload);
+                if self.set.ffmpeg_dir.is_none() || !downloaded {
+                    #[cfg(windows)]
+                    let label = s::OPT_UPDATE;
+                    #[cfg(not(windows))]
+                    let label = if downloaded { s::OPT_UPDATE } else { s::OPT_DOWNLOAD };
+                    if ui::button(ui, label, ui::Kind::Soft).on_hover_text(s::OPT_UPDATE_TIP).clicked() {
+                        actions.push(Action::Redownload);
+                    }
                 }
             });
             ui.end_row();
@@ -258,6 +283,48 @@ impl App {
                     ui.add_space(8.0);
                     ui::bar(ui, *frac, ui::ACCENT);
                     ui.label(muted(status.clone()));
+                });
+            }
+            #[cfg(not(windows))]
+            Setup::Choose { system } => {
+                ui.add_space((ui.available_height() * 0.18).max(10.0));
+                let system = system.clone();
+                ui::card(ui, ui::CARD, Stroke::new(1.0, ui::LINE), |ui| match &system {
+                    Some((tools, version)) => {
+                        ui.label(RichText::new(s::SETUP_FOUND_TITLE).size(19.0).strong());
+                        ui.label(muted(format!("{} · {}", tools.ffmpeg.display(), version.strip_prefix("ffmpeg ").unwrap_or(version))));
+                        ui.label(muted(s::SETUP_FOUND_BODY));
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(dir) = tools.ffmpeg.parent() {
+                                if ui::pill(ui, s::SETUP_USE_THIS, ui::Kind::Primary, 14.0).clicked() {
+                                    actions.push(Action::UseToolsDir(dir.to_path_buf()));
+                                }
+                            }
+                            if ui::button(ui, s::SETUP_DOWNLOAD_FULL, ui::Kind::Soft).clicked() {
+                                actions.push(Action::Redownload);
+                            }
+                            if ui::button(ui, s::CHOOSE_FOLDER, ui::Kind::Soft).clicked() {
+                                actions.push(Action::PickToolsDir);
+                            }
+                        });
+                    }
+                    None => {
+                        ui.label(RichText::new(s::SETUP_NONE_TITLE).size(19.0).strong());
+                        ui.label(muted(s::SETUP_NONE_BODY));
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui::pill(ui, s::SETUP_DOWNLOAD, ui::Kind::Primary, 14.0).clicked() {
+                                actions.push(Action::Redownload);
+                            }
+                            if ui::button(ui, s::CHOOSE_FOLDER, ui::Kind::Soft).clicked() {
+                                actions.push(Action::PickToolsDir);
+                            }
+                            if ui::button(ui, s::RETRY, ui::Kind::Soft).clicked() {
+                                actions.push(Action::RetrySetup);
+                            }
+                        });
+                    }
                 });
             }
             Setup::Failed(why) => {
@@ -1263,6 +1330,12 @@ impl App {
             Action::PickToolsDir => self.pick_folder(self.set.ffmpeg_dir.clone(), app::Msg::PickedToolsDir),
             Action::UseDownloaded => {
                 self.set.ffmpeg_dir = None;
+                self.mark_dirty();
+                self.start_setup(false);
+            }
+            #[cfg(not(windows))]
+            Action::UseToolsDir(dir) => {
+                self.set.ffmpeg_dir = Some(dir);
                 self.mark_dirty();
                 self.start_setup(false);
             }

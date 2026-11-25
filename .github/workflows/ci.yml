@@ -1,7 +1,8 @@
 name: CI
 
-# Every push builds the Windows exe the same way a release does, and checks the formatting.
-# The exe is kept for a week as an artifact, to try it before a release is made.
+# Every push builds the Windows exe and the Linux AppImage the same way a release does, runs the tests and
+# checks the formatting. The exe and the AppImage are kept for a week as artifacts, to try them before a
+# release is made.
 on:
   push:
     branches: [main]
@@ -22,6 +23,45 @@ jobs:
         with:
           name: stiva-windows-x64
           path: target/release/stiva.exe
+          retention-days: 7
+
+  # The tests that run a real ffmpeg need one with the usual encoders; Ubuntu 24.04 has it.
+  linux-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Test
+        run: cargo test --locked
+        env:
+          STIVA_FFDIR: /usr/bin
+
+  # Built on the oldest Ubuntu still offered, so the AppImage runs on anything newer than that.
+  linux-appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked
+      - name: Pack the AppImage
+        run: packaging/linux/build-appimage.sh "0.0.0-ci" target/release/stiva dist
+      - name: Start it
+        # A window needs a display and a GL driver; the program is still running after 15 seconds if it came up.
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+          chmod +x dist/*.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1 HOME="$RUNNER_TEMP/home" XDG_DATA_HOME="$RUNNER_TEMP/home/data"
+          mkdir -p "$HOME"
+          code=0
+          timeout 15 xvfb-run -a dist/stiva-0.0.0-ci-linux-x86_64.AppImage || code=$?
+          echo "exit code: $code"
+          test "$code" = 124
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stiva-linux-x86_64-appimage
+          path: dist/*.AppImage
           retention-days: 7
 
   format:

@@ -393,13 +393,16 @@ mod suspend {
     }
 }
 
-/// Only for trying the pause on the build machine; the program itself is for Windows.
+/// Pausing is a stop signal to ffmpeg, and a continue signal to go on.
 #[cfg(not(windows))]
 mod suspend {
-    use std::process::{Child, Command};
+    use std::process::Child;
 
     pub fn set(child: &Child, on: bool) -> bool {
-        Command::new("kill").args([if on { "-STOP" } else { "-CONT" }, &child.id().to_string()]).status().is_ok_and(|s| s.success())
+        let signal = if on { libc::SIGSTOP } else { libc::SIGCONT };
+        // SAFETY: a plain system call with a process id and a signal number. `Child` has not been waited for,
+        // so the id still names ffmpeg and not some other process.
+        unsafe { libc::kill(child.id() as libc::pid_t, signal) == 0 }
     }
 }
 

@@ -23,6 +23,9 @@ const LOG_LINES: usize = 4000;
 
 pub enum Msg {
     Tools(Result<Tools, String>),
+    /// Nothing is chosen or downloaded yet: the ffmpeg the system has, with its version, or none.
+    #[cfg(not(windows))]
+    Choose(Option<(Tools, String)>),
     Setup(String, Option<f32>),
     Caps(Result<Capabilities, String>),
     Picked(Vec<PathBuf>),
@@ -39,7 +42,15 @@ pub enum Msg {
 
 pub enum Setup {
     Checking,
-    Downloading { status: String, frac: Option<f32> },
+    Downloading {
+        status: String,
+        frac: Option<f32>,
+    },
+    /// Outside Windows nothing is downloaded before the user has said so. Holds the ffmpeg the system has, if any.
+    #[cfg(not(windows))]
+    Choose {
+        system: Option<(Tools, String)>,
+    },
     Ready(Tools),
     Failed(String),
 }
@@ -240,6 +251,9 @@ pub struct App {
     pub batch: Batch,
     pub power: Option<Power>,
     pub taskbar: platform::Taskbar,
+    /// The ffmpeg the system has, found at start and at each look for ffmpeg, for the options.
+    #[cfg(not(windows))]
+    pub system_tools: Option<Tools>,
     /// When a job last joined the queue; the queue button glows for a moment after.
     pub queue_flash: Option<Instant>,
     geom: Option<WindowGeom>,
@@ -313,6 +327,8 @@ impl App {
             batch: Batch::default(),
             power: None,
             taskbar: platform::Taskbar::default(),
+            #[cfg(not(windows))]
+            system_tools: deps::system(),
             queue_flash: None,
             dirty: false,
             last_save: Instant::now(),
@@ -327,6 +343,10 @@ impl App {
     /// Finds ffmpeg, or downloads it. `force` downloads even when a copy is there.
     pub fn start_setup(&mut self, force: bool) {
         self.setup = Setup::Checking;
+        #[cfg(not(windows))]
+        {
+            self.system_tools = deps::system();
+        }
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let custom = self.set.ffmpeg_dir.clone();
         std::thread::spawn(move || {
@@ -336,6 +356,18 @@ impl App {
             let result = match found {
                 Some(t) if !stale => Ok(t),
                 old => {
+                    // Outside Windows nothing is downloaded before the user has said so: ask, offering the ffmpeg the
+                    // system has. "Download" comes back here with `force` set.
+                    #[cfg(not(windows))]
+                    if !force && old.is_none() {
+                        let system = deps::system().map(|t| {
+                            let version = deps::version(&t.ffmpeg);
+                            (t, version)
+                        });
+                        let _ = tx.send(Msg::Choose(system));
+                        ctx.request_repaint();
+                        return;
+                    }
                     let _ = tx.send(Msg::Setup("Starting...".into(), None));
                     let fetched = deps::download(&mut |m, f| {
                         let _ = tx.send(Msg::Setup(m.to_string(), f));
@@ -367,6 +399,8 @@ impl App {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Setup(status, frac) => self.setup = Setup::Downloading { status, frac },
+                #[cfg(not(windows))]
+                Msg::Choose(system) => self.setup = Setup::Choose { system },
                 Msg::Tools(Ok(t)) => {
                     let (tx, ctx, ff) = (self.tx.clone(), self.ctx.clone(), t.ffmpeg.clone());
                     std::thread::spawn(move || {
@@ -532,7 +566,7 @@ impl App {
             _ => true,
         };
         if !ok {
-            self.toast(&format!("Could not {}", what.label().to_lowercase()), "Windows did not accept it.", true, false);
+            self.toast(&format!("Could not {}", what.label().to_lowercase()), "The system did not accept it.", true, false);
         }
     }
 
@@ -1039,6 +1073,13 @@ impl App {
         }
     }
 
+    /// True when the folder the user chose is the one the system's ffmpeg is in.
+    #[cfg(not(windows))]
+    pub fn using_system_tools(&self) -> bool {
+        let dir = self.set.ffmpeg_dir.as_deref();
+        dir.is_some() && self.system_tools.as_ref().and_then(|t| t.ffmpeg.parent()) == dir
+    }
+
     pub fn using_custom_tools(&self) -> bool {
         self.set.ffmpeg_dir.as_deref().and_then(|d| deps::locate(Some(d))).is_some_and(|t| self.tools() == Some(&t))
     }
@@ -1184,7 +1225,7 @@ pub fn reveal(p: &Path) {
         let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", p.display())).spawn();
     }
     #[cfg(not(windows))]
-    open_path(p.parent().unwrap_or(p));
+    crate::platform::reveal(p);
 }
 
 pub fn container_note(c: Container) -> &'static str {

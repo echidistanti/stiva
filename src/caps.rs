@@ -145,9 +145,7 @@ impl Capabilities {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         };
         let listing = run(&["-hide_banner", "-encoders"])?;
-        // "ffmpeg version 7.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2025 ..." -> the first three words.
-        let version =
-            run(&["-hide_banner", "-version"])?.lines().next().unwrap_or("").split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+        let version = crate::deps::version_words(run(&["-hide_banner", "-version"])?.lines().next().unwrap_or(""));
         let mut caps = Capabilities::parse(&listing, &version);
         if caps.encoders.is_empty() {
             return Err("ffmpeg did not list any encoder".into());

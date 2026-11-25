@@ -22,7 +22,8 @@ fn main() -> eframe::Result {
     // Files given on the command line, as when Windows opens them with this program.
     let open: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect();
     let mut size = app::START_SIZE;
-    let mut viewport = eframe::egui::ViewportBuilder::default().with_decorations(false).with_min_inner_size(app::MIN_SIZE);
+    let mut viewport =
+        eframe::egui::ViewportBuilder::default().with_decorations(false).with_app_id("stiva").with_min_inner_size(app::MIN_SIZE);
     if let Some(g) = &set.window {
         size = [g.size[0].max(app::MIN_SIZE[0]), g.size[1].max(app::MIN_SIZE[1])];
         if let Some(p) = g.pos.filter(|p| p[0] > -10000.0 && p[1] > -10000.0 && p[0] < 20000.0 && p[1] < 20000.0) {

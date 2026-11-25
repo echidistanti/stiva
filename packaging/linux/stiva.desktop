@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Stiva
+GenericName=Video converter
+Comment=Convert video with ffmpeg, with a queue and presets
+Exec=stiva %F
+Icon=stiva
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/x-flv;video/ogg;video/3gpp;video/x-m4v;audio/mpeg;audio/flac;audio/ogg;audio/x-wav;audio/mp4;
+Keywords=video;convert;transcode;encode;ffmpeg;
+StartupWMClass=stiva

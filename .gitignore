@@ -1,3 +1,4 @@
 /target
 installer/output/
 *.part
+/dist

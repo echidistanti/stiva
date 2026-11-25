@@ -1,7 +1,8 @@
 name: Release
 
 # Publishing a release builds everything on GitHub: stiva.exe for Windows (MSVC) from the tag, the portable
-# stiva-<version>-windows-x64.7z attached to the release, and then the setup (see installer.yml).
+# stiva-<version>-windows-x64.7z attached to the release, and then the setup (see installer.yml). On Linux it
+# builds stiva-<version>-linux-x86_64.AppImage and attaches that too.
 on:
   release:
     types: [published]
@@ -41,6 +42,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "7z failed" }
           Pop-Location
           gh release upload $env:TAG "stiva-$version-windows-x64.7z" --repo $env:GITHUB_REPOSITORY --clobber
+
+  appimage:
+    # The oldest Ubuntu still offered: an AppImage runs on anything with a glibc at least as new as the one it was built on.
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build stiva
+        run: cargo build --release --locked
+
+      - name: Pack the AppImage and attach it to the release
+        run: |
+          version="${TAG#v}"
+          packaging/linux/build-appimage.sh "$version" target/release/stiva dist
+          gh release upload "$TAG" "dist/stiva-$version-linux-x86_64.AppImage" --repo "$GITHUB_REPOSITORY" --clobber
 
   installer:
     needs: build

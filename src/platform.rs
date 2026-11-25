@@ -1,36 +1,35 @@
 //! What only the operating system can do: a notification, the progress on the taskbar button, sleep and
-//! shutdown. On Windows these are real. Elsewhere they do nothing (and sleep and shutdown refuse), so the
-//! rest of the program can be run and tested on Linux without a machine going to sleep under the tester.
+//! shutdown, showing a file in the file manager. On Windows these go through Windows Runtime and the shell;
+//! on Linux through D-Bus (the notification server, systemd-logind, the file manager). The taskbar progress is
+//! Windows only. In the tests nothing here touches the machine: a test run that put the PC to sleep would
+//! be no favour.
 
 use crate::after::TaskbarState;
 use eframe::egui;
 
-/// Shows a notification under Stiva's own name. Fire and forget: if Windows will not show it, nothing happens.
+/// Shows a notification under Stiva's own name. Fire and forget: if the system will not show it, nothing happens.
 pub fn notify(title: &str, body: &str) {
-    #[cfg(windows)]
-    imp::notify(title, body);
-    #[cfg(not(windows))]
-    let _ = (title, body);
+    if !cfg!(test) {
+        imp::notify(title, body);
+    }
 }
 
-/// Puts the PC to sleep. Returns false when this is not possible here.
+/// Puts the PC to sleep. Returns false when the system did not accept it.
 pub fn sleep() -> bool {
-    #[cfg(windows)]
-    {
-        imp::sleep()
-    }
-    #[cfg(not(windows))]
-    false
+    !cfg!(test) && imp::sleep()
 }
 
 /// Shuts the PC down at once, without forcing programs that have something unsaved to close.
 pub fn shutdown() -> bool {
-    #[cfg(windows)]
-    {
-        imp::shutdown()
+    !cfg!(test) && imp::shutdown()
+}
+
+/// Opens the folder that holds `path` with the file selected, where the file manager can do that.
+#[cfg(not(windows))]
+pub fn reveal(path: &std::path::Path) {
+    if !cfg!(test) {
+        imp::reveal(path);
     }
-    #[cfg(not(windows))]
-    false
 }
 
 /// The progress shown on Stiva's button in the taskbar.
@@ -104,6 +103,116 @@ fn toast_xml(title: &str, body: &str) -> String {
         escape(title),
         escape(body)
     )
+}
+
+/// The text of a notification for a server that reads a little markup: `&`, `<` and `>` stay what they are.
+#[cfg_attr(windows, allow(dead_code))]
+fn markup_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// `file:///home/me/My%20Videos/a.mkv`: the address a file manager is asked to show.
+#[cfg_attr(windows, allow(dead_code))]
+fn file_uri(path: &std::path::Path) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("file://");
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec();
+    #[cfg(not(unix))]
+    let bytes = path.to_string_lossy().into_owned().into_bytes();
+    for b in bytes {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(b as char),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+mod imp {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use zbus::blocking::Connection;
+    use zbus::zvariant::Value;
+
+    const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
+
+    /// Sends the notification from a thread of its own, so the window never waits for the bus.
+    pub fn notify(title: &str, body: &str) {
+        let (title, body) = (super::markup_escape(title), super::markup_escape(body));
+        let _ = std::thread::Builder::new().name("notify".into()).spawn(move || {
+            let _ = show(&title, &body);
+        });
+    }
+
+    pub(super) fn show(title: &str, body: &str) -> zbus::Result<()> {
+        // The program's icon as a file: an AppImage puts none in the icon theme.
+        let icon = crate::deps::data_dir().join("icon.png");
+        if !icon.is_file() {
+            let _ = std::fs::create_dir_all(crate::deps::data_dir());
+            let _ = std::fs::write(&icon, crate::icon::PNG);
+        }
+        let icon = icon.to_str().filter(|_| icon.is_file()).unwrap_or("stiva").to_owned();
+        // "desktop-entry" lets the shell tie the notification to Stiva's launcher when there is one.
+        let hints: HashMap<&str, Value<'_>> = HashMap::from([("desktop-entry", Value::from("stiva"))]);
+        Connection::session()?.call_method(
+            Some(NOTIFICATIONS),
+            "/org/freedesktop/Notifications",
+            Some(NOTIFICATIONS),
+            "Notify",
+            &("Stiva", 0u32, icon.as_str(), title, body, Vec::<&str>::new(), hints, -1i32),
+        )?;
+        Ok(())
+    }
+
+    /// Asks systemd-logind (or elogind), as the desktop's own power menu does. Not interactive: when the
+    /// system wants a password for it (somebody else is logged in), the answer is no and Stiva says so.
+    fn logind(method: &str) -> bool {
+        Connection::system()
+            .and_then(|c| {
+                c.call_method(
+                    Some("org.freedesktop.login1"),
+                    "/org/freedesktop/login1",
+                    Some("org.freedesktop.login1.Manager"),
+                    method,
+                    &(false,),
+                )
+            })
+            .is_ok()
+    }
+
+    pub fn sleep() -> bool {
+        logind("Suspend")
+    }
+
+    pub fn shutdown() -> bool {
+        logind("PowerOff")
+    }
+
+    /// Asks the file manager to show the file, selected; failing that, opens its folder. From a thread of its
+    /// own: a file manager that has to start first would hold the window up.
+    pub fn reveal(path: &Path) {
+        let path = path.to_path_buf();
+        let _ = std::thread::Builder::new().name("reveal".into()).spawn(move || {
+            if show_item(&path).is_err() {
+                crate::app::open_path(path.parent().unwrap_or(&path));
+            }
+        });
+    }
+
+    pub(super) fn show_item(path: &Path) -> zbus::Result<()> {
+        Connection::session()?.call_method(
+            Some("org.freedesktop.FileManager1"),
+            "/org/freedesktop/FileManager1",
+            Some("org.freedesktop.FileManager1"),
+            "ShowItems",
+            &(vec![super::file_uri(path)], ""),
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -229,12 +338,33 @@ mod tests {
     }
 
     #[test]
-    fn off_windows_the_power_actions_refuse_and_the_taskbar_just_remembers() {
-        if cfg!(windows) {
-            return;
-        }
+    fn in_the_tests_the_power_actions_refuse_and_the_taskbar_just_remembers() {
         assert!(!sleep() && !shutdown());
         let t = Taskbar::default();
         assert_eq!(t.shown(), None);
+    }
+
+    #[test]
+    fn notification_text_cannot_open_a_tag() {
+        assert_eq!(markup_escape("3 files done · -41%"), "3 files done · -41%");
+        assert_eq!(markup_escape("a<b>&c"), "a&lt;b&gt;&amp;c");
+    }
+
+    /// Needs a session bus with a notification server and a file manager on it; the sandbox runs it against a
+    /// stand-in for both (`dbus-run-session`), the CI does not.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs a session bus with a notification server and a file manager"]
+    fn a_notification_and_a_reveal_reach_the_bus() {
+        imp::show("Encoding finished", "2 files done · -41% & <more>").unwrap();
+        imp::show_item(std::path::Path::new("/home/me/My Videos/a b.mkv")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_becomes_an_address_a_file_manager_understands() {
+        use std::path::Path;
+        assert_eq!(file_uri(Path::new("/home/me/Videos/Stiva/a.mkv")), "file:///home/me/Videos/Stiva/a.mkv");
+        assert_eq!(file_uri(Path::new("/home/me/My Videos/100% #1 é.mp4")), "file:///home/me/My%20Videos/100%25%20%231%20%C3%A9.mp4");
     }
 }
