@@ -71,7 +71,7 @@ If the output name is taken, Stiva adds a number; *Options* can overwrite, skip 
 
 ## Hardware encoders
 
-When Stiva starts it runs a short test encode with every hardware encoder and lists only the ones that worked. For VA-API the test goes further: the encode is written to an MP4, read back and compared with the test picture, because a graphics chip can finish an encode without any error and still write garbage. `logs/encoders.txt` (in the data folder) keeps what each test said and, for VA-API, which graphics device it used, so a missing encoder can be traced.
+When Stiva starts it runs a short test encode with every hardware encoder and lists only the ones that worked. The test goes further than starting the encoder: the encode is written to an MP4, read back and compared with the test picture, because a graphics chip can finish an encode without any error and still write garbage. An encoder whose picture is garbage is not offered. `logs/encoders.txt` (in the data folder) keeps what each test said and, for VA-API, which graphics device it used, so a missing encoder can be traced.
 
 | System | Encoders | What they need |
 | --- | --- | --- |

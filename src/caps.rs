@@ -251,12 +251,13 @@ fn first_lines(said: &str) -> String {
     said.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join(" | ")
 }
 
-/// A short encode of the test picture. A graphics chip's encode is written to a real MP4 and read back, because
-/// an encoder can finish without any error and still write a picture that is garbage; the others only have to
-/// finish.
+/// A short encode of the test picture. A hardware encode is written to a real MP4, with the tag a job would use,
+/// and read back, because an encoder can finish without any error and still write a picture that is garbage;
+/// the software ones only have to finish.
 fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool, device: &str) -> Result<(), String> {
     let rate = if bitrate { Rate::Kbps(1000) } else { Rate::Quality(codec.default_crf()) };
-    let check = codec.is_vaapi().then(|| std::env::temp_dir().join(format!("stiva-probe-{}-{}.mp4", std::process::id(), codec.encoder())));
+    let check =
+        codec.is_hardware().then(|| std::env::temp_dir().join(format!("stiva-probe-{}-{}.mp4", std::process::id(), codec.encoder())));
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
     if codec.is_vaapi() {
@@ -305,8 +306,16 @@ fn picture_is_sound(ffmpeg: &Path, file: &Path) -> Result<(), String> {
     match psnr_of(&said) {
         Some(db) if db >= MIN_PSNR_DB => Ok(()),
         Some(db) => Err(format!("it finishes, but the picture is garbage ({db:.1} dB against the test picture)")),
+        // This ffmpeg cannot decode what the encoder wrote (an AV1 build without a software decoder, say). That
+        // says nothing about the encoder, so it is not hidden for it.
+        None if lacks_decoder(&said) => Ok(()),
         None => Err(format!("could not read the test picture back: {}", first_lines(&said))),
     }
+}
+
+/// Whether ffmpeg's complaint is about having no decoder for the file, not about the file.
+fn lacks_decoder(said: &str) -> bool {
+    ["Decoder (codec", "Unknown decoder", "Unsupported codec", "doesn't support hardware accelerated"].iter().any(|m| said.contains(m))
 }
 
 /// The average PSNR in dB that ffmpeg's psnr filter prints at the end ("inf" when the pictures are identical).
@@ -379,6 +388,13 @@ mod tests {
         assert!(!caps.report().contains("VA-API device"));
         caps.vaapi_device = Some("/dev/dri/renderD129".into());
         assert!(caps.report().contains("VA-API device: /dev/dri/renderD129\n"), "{}", caps.report());
+    }
+
+    #[test]
+    fn a_missing_decoder_is_told_from_a_bad_file() {
+        assert!(lacks_decoder("Decoder (codec av1) not found for input stream #0:0"));
+        assert!(lacks_decoder("Your platform doesn't support hardware accelerated AV1 decoding."));
+        assert!(!lacks_decoder("moov atom not found\nInvalid data found when processing input"));
     }
 
     #[test]

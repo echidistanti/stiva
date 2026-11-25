@@ -704,6 +704,17 @@ mod tests {
     }
 
     #[test]
+    fn only_h265_outside_vaapi_gets_the_hvc1_tag() {
+        use VideoCodec::*;
+        for c in [X265, HevcAmf, HevcNvenc, HevcQsv] {
+            assert_eq!(c.mp4_tag(), Some("hvc1"), "{c:?}");
+        }
+        for c in [HevcVaapi, X264, H264Amf, H264Vaapi, SvtAv1, Av1Vaapi, Vp9] {
+            assert_eq!(c.mp4_tag(), None, "{c:?}");
+        }
+    }
+
+    #[test]
     fn vaapi_needs_the_upload_filter_and_no_pixel_format_of_its_own() {
         for c in [VideoCodec::H264Vaapi, VideoCodec::HevcVaapi, VideoCodec::Av1Vaapi] {
             assert!(c.is_vaapi() && c.is_hardware() && !c.has_speed() && !c.can_two_pass(), "{c:?}");
