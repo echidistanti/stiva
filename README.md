@@ -16,12 +16,12 @@
 
 </div>
 
-I wanted a converter that stays close to ffmpeg without making me write command lines: open a file, pick a preset, press Encode. Stiva is that. The layout follows [VidCoder](https://github.com/RandomEngy/VidCoder), the look follows my other app [Camallo](https://github.com/echidistanti/camallo). It is a version 0.1 project, and the [test notes](#what-i-have-tested) say plainly what I have and have not tried.
+I wanted a converter that stays close to ffmpeg without making me write command lines: open a file, pick a preset, press Encode. Stiva is that. The layout follows [VidCoder](https://github.com/RandomEngy/VidCoder), the look follows my other app [Camallo](https://github.com/echidistanti/camallo). It is a young project, and the [test notes](#what-i-have-tested) say plainly what I have and have not tried.
 
 ## Features
 
 - **Formats in and out.** Reads anything ffmpeg reads. Writes MP4, MKV, WebM, MP3, M4A, Opus and FLAC.
-- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware, plus VA-API for AMD and Intel graphics on Linux (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. SVT-AV1 has tune and film grain; every encoder, hardware included, takes extra ffmpeg options. Stiva tests each encoder on the machine and shows only those that really start.
+- **Video encoders.** x264, x265, SVT-AV1 and VP9 in software; AMD AMF, NVIDIA NVENC and Intel QSV in hardware, plus VA-API for AMD and Intel graphics on Linux (H.264, HEVC, AV1). 8-bit and 10-bit. Quality, bitrate or target file size, with two passes. SVT-AV1 has tune and film grain; every encoder, hardware included, takes extra ffmpeg options. Stiva tests each encoder on the machine and shows only those that really start; [Hardware encoders](#hardware-encoders) says what each needs.
 - **Audio.** AAC, MP3, Opus, Vorbis, AC-3, FLAC, copy or none; mono, stereo or 5.1; choice of tracks.
 - **Picture.** Size limit, crop (auto or manual), rotate, flip, deinterlace, detelecine, denoise, sharpen, grayscale and a free ffmpeg filter field.
 - **Subtitles, chapters, time range.** Keep the tracks you want, chapters travel in MKV, encode only a stretch of the file.
@@ -69,6 +69,29 @@ If the output name is taken, Stiva adds a number; *Options* can overwrite, skip 
 
 **When done:** sleep and shut down wait 15 and 60 seconds with *Cancel* and *Now*, run only if something was actually finished, and never force other programs. The choice is not remembered between runs. On Linux they ask systemd-logind, as the desktop's own power menu does; if the system wants a password for it (somebody else is logged in), Stiva says it could not.
 
+## Hardware encoders
+
+When Stiva starts it runs a short test encode with every hardware encoder and lists only the ones that worked. `logs/encoders.txt` (in the data folder) keeps what each test said and, for VA-API, which graphics device it used, so a missing encoder can be traced.
+
+| System | Encoders | What they need |
+| --- | --- | --- |
+| Windows | AMD AMF, NVIDIA NVENC, Intel QSV | the card and its current driver |
+| Linux, AMD or Intel graphics | VA-API (H.264, HEVC, AV1) | `libva` and your distribution's video driver |
+| Linux, NVIDIA | NVENC | NVIDIA's own driver (not nouveau) |
+| Linux, Intel | QSV | the oneVPL runtime; VA-API is the easier route |
+
+All three codecs are offered where the chip has them; 10-bit only for HEVC and AV1. AMF is not offered on Linux in practice (it needs AMD's proprietary runtime); use VA-API there.
+
+**Problems I know of**
+
+- **Only AV1 shows up on Fedora or openSUSE.** Their Mesa is built without H.264 and H.265 and keeps AV1, so `vainfo | grep -i enc` lists only `VAProfileAV1Profile0`. On Fedora install the full driver from RPM Fusion Free: `sudo dnf install mesa-va-drivers-freeworld` (Fedora 44) or `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing` (Fedora 43 and earlier), then log out and in.
+- **No VA-API encoder at all.** Either `libva` or the driver is missing (Debian and Ubuntu: `libva2` and `mesa-va-drivers`, or `intel-media-va-driver` for newer Intel), or your user may not open the graphics device: `ls -l /dev/dri` shows the `render` group, and `sudo usermod -aG render $USER` followed by a new login fixes it. The ffmpeg Stiva downloads loads `libva` from the system, so what `vainfo` shows is what Stiva gets.
+- **AV1 is missing.** Older chips cannot encode it. You need RDNA3 (Radeon RX 7000 and the 780M or 760M inside recent Ryzens), Intel Arc, or NVIDIA RTX 40 and newer. H.264 and HEVC still work.
+- **Two graphics devices (a laptop with a card and integrated graphics).** Stiva tries each `/dev/dri/renderD*` and keeps the one that passes the most tests. `encoders.txt` names it.
+- **"10-bit did not pass its test".** The driver or card does not do it; 8-bit is unaffected.
+- **The file is bigger than x264 or x265 would make at the same quality.** Normal for hardware encoders: they are made for speed. For archiving, use software.
+- **VA-API settings.** No speed setting (drivers do not agree on one) and no two passes; quality or bitrate only. The quality number is not comparable with x264's.
+
 ## Data and privacy
 
 Everything lives in `%LOCALAPPDATA%\Stiva` on Windows and `~/.local/share/stiva` on Linux: `settings.json`, `presets/`, `queue.json`, `bin/` (a downloaded ffmpeg), `logs/` (one per encode, plus `encoders.txt`). On Windows one registry key, `HKCU\Software\Classes\AppUserModelId\Stiva`, gives the notification its name and icon.
@@ -79,18 +102,17 @@ No accounts, no telemetry, no update check. The only network request is the ffmp
 
 I use Stiva on my own Windows 11 computer (AMD Ryzen, Radeon graphics) and have tried there: the first start and ffmpeg download, presets, the queue, pause and stop, 8-bit and 10-bit with x264, x265, SVT-AV1 and VP9, filters, bitrate, target size, two passes, subtitles, the notification, taskbar progress, every *When done* choice, the installer, and the **AMD AMF** encoders.
 
-**Not tried on real hardware: NVIDIA NVENC, Intel QSV, VA-API and hardware AV1.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
+**Hardware encoders tried:** AMD AMF on Windows, and VA-API on Linux with one AMD integrated GPU, where it encodes. **Not tried: NVIDIA NVENC, Intel QSV, VA-API on Intel graphics.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
 
-**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have since run the AppImage on one real desktop, Fedora with COSMIC on an AMD integrated GPU: it starts, downloads ffmpeg from inside the program and encodes with VA-API. *Sleep* and *Shut down* on Linux, other desktops and distributions, and every other GPU are untried.
+**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have since run the AppImage on one real desktop, Fedora with COSMIC on an AMD integrated GPU: it starts, downloads ffmpeg from inside the program and encodes with VA-API. *Sleep* and *Shut down* on Linux, other desktops and distributions, and every other GPU are untried. So is dropping a file from a file manager on Wayland: Stiva goes through XWayland for that (see [Troubleshooting](#troubleshooting)), and I have not confirmed it on a real desktop.
 
-About a hundred automated tests run on Linux, including real ffmpeg encodes that check the command lines produce files with the right streams, size and length.
+More than a hundred automated tests run on Linux, including real ffmpeg encodes that check the command lines produce files with the right streams, size and length.
 
 ## Troubleshooting
 
 - **SmartScreen or Defender warns, or removes the exe.** Stiva is new and unsigned, and it downloads and unpacks a program, which heuristics look at. SmartScreen: *More info → Run anyway*. Defender: *Protection history → restore → Allow on device*, then report a false positive at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission). The source is here and `cargo build --release` produces the same program.
 - **ffmpeg will not download.** Check proxy or antivirus and retry, or point Stiva to your own ffmpeg folder (it needs `ffmpeg` and `ffprobe`, with `.exe` on Windows).
-- **A hardware encoder is missing, or "10-bit did not pass its test".** The driver or card does not offer it; `logs/encoders.txt` shows what each test said. On Linux Stiva offers NVENC, Intel QSV where oneVPL is installed, and VA-API for AMD and Intel graphics. VA-API needs `libva` and your distribution's video driver (on Debian and Ubuntu `libva2` and `mesa-va-drivers`, or `intel-media-va-driver` for newer Intel); the ffmpeg Stiva downloads loads them from the system. AV1 encoding needs a recent chip (RDNA3 or Arc), so older ones show H.264 and HEVC only.
-- **Only AV1 shows up under VA-API on Fedora (or openSUSE).** Their Mesa is built without H.264 and H.265, and AV1 is left. `vainfo | grep -i enc` shows only `VAProfileAV1Profile0`. On Fedora install the full driver from RPM Fusion Free: `sudo dnf install mesa-va-drivers-freeworld` (Fedora 44), or `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing` (Fedora 43 and earlier). Then log out and in again.
+- **A hardware encoder is missing.** See [Hardware encoders](#hardware-encoders): what each needs, and the usual causes (Fedora's codecs, a missing `libva`, no access to the graphics device, a chip without AV1).
 - **Dropping a file on the window does nothing (Linux).** On Wayland the window library does not pass dropped files on; X11 does. So on a Wayland desktop that has XWayland (COSMIC, GNOME, KDE) Stiva opens through X11, and starts over on native Wayland if that fails. If you want native Wayland, which is sharper on a scaled screen, start Stiva with `STIVA_WAYLAND=1`; *Open file* always works.
 - **The AppImage does not start (Linux).** Most often FUSE 2 is missing: install `libfuse2` (`libfuse2t64` on Ubuntu 24.04), or run it as `./stiva-<version>-linux-x86_64.AppImage --appimage-extract-and-run`. If a file dialog never opens, your desktop has no `xdg-desktop-portal`; install the one for it.
 - **The system's ffmpeg lacks an encoder (Linux).** Distributions sometimes build ffmpeg without x264, x265 or SVT-AV1. *Options → ffmpeg → Download ffmpeg* fetches the full build.
@@ -105,7 +127,7 @@ cargo run                                              # debug build, Windows or
 STIVA_FFDIR=/usr/bin cargo test                        # tests; the folder must hold ffmpeg and ffprobe
 cargo build --release                                  # on Windows (MSVC), as the releases are built
 cargo build --release --target x86_64-pc-windows-gnu   # a Windows exe from Linux (mingw-w64)
-packaging/linux/build-appimage.sh 0.1.2                # on Linux, after cargo build --release: dist/stiva-0.1.2-linux-x86_64.AppImage
+packaging/linux/build-appimage.sh 0.2.0                # on Linux, after cargo build --release: dist/stiva-0.2.0-linux-x86_64.AppImage
 ```
 
 Without ffmpeg, the tests that encode skip themselves. On Linux no extra packages are needed to build: the window, graphics and D-Bus libraries are loaded when the program starts.
@@ -134,7 +156,7 @@ Bug reports are welcome. Please include the Stiva version, your system (Windows 
 - English interface only (the installer also speaks Italian).
 - Queue rows cannot be selected, so there is no `Delete` key; each row has its own remove button.
 - Linux: VA-API has no speed setting (drivers do not agree on one), no progress on the taskbar or dock, and the window is drawn by Stiva (title bar included), not by the desktop. On a Wayland desktop it opens through XWayland so that dropping files works, which can look soft on a fractionally scaled screen (`STIVA_WAYLAND=1` avoids that and gives up the drop).
-- Windows 11 and AMD AMF are the only system and hardware encoder I have tried.
+- Windows 11 and Fedora with COSMIC are the only systems I have tried, with AMD graphics only.
 
 ## Credits
 

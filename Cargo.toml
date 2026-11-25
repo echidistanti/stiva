@@ -1,8 +1,8 @@
 [package]
 name = "stiva"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
-description = "Windows video transcoder with a queue and presets. ffmpeg does the work."
+description = "Video transcoder for Windows and Linux with a queue and presets. ffmpeg does the work."
 license = "MIT"
 repository = "https://github.com/echidistanti/stiva"
 
