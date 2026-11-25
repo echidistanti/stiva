@@ -128,7 +128,7 @@ cargo run                                              # debug build, Windows or
 STIVA_FFDIR=/usr/bin cargo test                        # tests; the folder must hold ffmpeg and ffprobe
 cargo build --release                                  # on Windows (MSVC), as the releases are built
 cargo build --release --target x86_64-pc-windows-gnu   # a Windows exe from Linux (mingw-w64)
-packaging/linux/build-appimage.sh 0.2.1                # on Linux, after cargo build --release: dist/stiva-0.2.1-linux-x86_64.AppImage
+packaging/linux/build-appimage.sh 0.2.2                # on Linux, after cargo build --release: dist/stiva-0.2.2-linux-x86_64.AppImage
 ```
 
 Without ffmpeg, the tests that encode skip themselves. On Linux no extra packages are needed to build: the window, graphics and D-Bus libraries are loaded when the program starts.
