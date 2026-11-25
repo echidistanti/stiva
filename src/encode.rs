@@ -214,9 +214,10 @@ fn args_for(job: &Job, pass: Pass) -> Vec<OsString> {
             Pass::First(log) => args.extend(["-pass".to_string(), "1".to_string(), "-passlogfile".to_string(), log.to_string()]),
             Pass::Second(log) => args.extend(["-pass".to_string(), "2".to_string(), "-passlogfile".to_string(), log.to_string()]),
         }
-        if codec.is_hevc() && st.container == Container::Mp4 {
-            // Without this tag Apple players and Windows' own player do not recognise H.265 in MP4.
-            args.extend(["-tag:v".to_string(), "hvc1".to_string()]);
+        if st.container == Container::Mp4 {
+            if let Some(tag) = codec.mp4_tag() {
+                args.extend(["-tag:v".to_string(), tag.to_string()]);
+            }
         }
         args.extend(st.video_extras());
         o(&args.iter().map(String::as_str).collect::<Vec<_>>());
@@ -695,7 +696,9 @@ mod tests {
         assert!(l.starts_with("-hide_banner -nostdin -nostats -y -loglevel info -vaapi_device /dev/dri/renderD"), "{l}");
         assert!(l.contains(" -i /in/film.avi "), "{l}");
         assert!(l.contains("-vf format=nv12,hwupload "), "no other filter, only the upload: {l}");
-        assert!(l.contains("-c:v hevc_vaapi -rc_mode CQP -qp 28 -tag:v hvc1 "), "{l}");
+        assert!(l.contains("-c:v hevc_vaapi -rc_mode CQP -qp 28 "), "{l}");
+        // The hvc1 tag turned this chip's pictures into garbage, so VA-API HEVC is written without it.
+        assert!(!l.contains("-tag:v"), "{l}");
         assert!(!l.contains("-pix_fmt") && !l.contains("-preset"), "{l}");
 
         // The user's own filters run on the CPU first; the picture goes up last.

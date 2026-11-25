@@ -71,7 +71,7 @@ If the output name is taken, Stiva adds a number; *Options* can overwrite, skip 
 
 ## Hardware encoders
 
-When Stiva starts it runs a short test encode with every hardware encoder and lists only the ones that worked. `logs/encoders.txt` (in the data folder) keeps what each test said and, for VA-API, which graphics device it used, so a missing encoder can be traced.
+When Stiva starts it runs a short test encode with every hardware encoder and lists only the ones that worked. For VA-API the test goes further: the encode is written to an MP4, read back and compared with the test picture, because a graphics chip can finish an encode without any error and still write garbage. `logs/encoders.txt` (in the data folder) keeps what each test said and, for VA-API, which graphics device it used, so a missing encoder can be traced.
 
 | System | Encoders | What they need |
 | --- | --- | --- |
@@ -86,6 +86,7 @@ All three codecs are offered where the chip has them; 10-bit only for HEVC and A
 
 - **Only AV1 shows up on Fedora or openSUSE.** Their Mesa is built without H.264 and H.265 and keeps AV1, so `vainfo | grep -i enc` lists only `VAProfileAV1Profile0`. On Fedora install the full driver from RPM Fusion Free: `sudo dnf install mesa-va-drivers-freeworld` (Fedora 44) or `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing` (Fedora 43 and earlier), then log out and in.
 - **No VA-API encoder at all.** Either `libva` or the driver is missing (Debian and Ubuntu: `libva2` and `mesa-va-drivers`, or `intel-media-va-driver` for newer Intel), or your user may not open the graphics device: `ls -l /dev/dri` shows the `render` group, and `sudo usermod -aG render $USER` followed by a new login fixes it. The ffmpeg Stiva downloads loads `libva` from the system, so what `vainfo` shows is what Stiva gets.
+- **The picture is garbage (colour blocks, flat green).** On a Radeon 780M, HEVC written to MP4 with the `hvc1` tag came out like that, while the same encode without the tag was perfect. Version 0.2.0 added the tag and was wrong on this chip; from 0.2.1 VA-API HEVC goes into MP4 without it. The price: Apple's players want `hvc1` and may refuse the file. Use MKV, or x265 in software, for files that must play there. If you still get garbage, with H.264 or any other codec, send me the *Log* of the job (the command is in its first lines).
 - **AV1 is missing.** Older chips cannot encode it. You need RDNA3 (Radeon RX 7000 and the 780M or 760M inside recent Ryzens), Intel Arc, or NVIDIA RTX 40 and newer. H.264 and HEVC still work.
 - **Two graphics devices (a laptop with a card and integrated graphics).** Stiva tries each `/dev/dri/renderD*` and keeps the one that passes the most tests. `encoders.txt` names it.
 - **"10-bit did not pass its test".** The driver or card does not do it; 8-bit is unaffected.
@@ -102,9 +103,9 @@ No accounts, no telemetry, no update check. The only network request is the ffmp
 
 I use Stiva on my own Windows 11 computer (AMD Ryzen, Radeon graphics) and have tried there: the first start and ffmpeg download, presets, the queue, pause and stop, 8-bit and 10-bit with x264, x265, SVT-AV1 and VP9, filters, bitrate, target size, two passes, subtitles, the notification, taskbar progress, every *When done* choice, the installer, and the **AMD AMF** encoders.
 
-**Hardware encoders tried:** AMD AMF on Windows, and VA-API on Linux with one AMD integrated GPU, where it encodes. **Not tried: NVIDIA NVENC, Intel QSV, VA-API on Intel graphics.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
+**Hardware encoders tried:** AMD AMF on Windows, and VA-API on Linux with one AMD integrated GPU (Radeon 780M). There AV1 and HEVC (MKV, and MP4 without the `hvc1` tag) give a sound picture; HEVC with the tag gave garbage, which 0.2.1 avoids. **H.264 through Stiva itself is not confirmed:** it was reported as garbage, but the same command run by hand gave a sound picture, and I have not found why. **Not tried: NVIDIA NVENC, Intel QSV, VA-API on Intel graphics.** Stiva offers them only when ffmpeg can start them, but I have not looked at a file they made. Reports from such machines are the most useful thing you can send me.
 
-**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have since run the AppImage on one real desktop, Fedora with COSMIC on an AMD integrated GPU: it starts, downloads ffmpeg from inside the program and encodes with VA-API. *Sleep* and *Shut down* on Linux, other desktops and distributions, and every other GPU are untried. So is dropping a file from a file manager on Wayland: Stiva goes through XWayland for that (see [Troubleshooting](#troubleshooting)), and I have not confirmed it on a real desktop.
+**Linux is new.** I build and test it in a headless Linux session: the automated tests (CI runs them with the same ffmpeg build Stiva downloads), the window under a virtual display, the AppImage (CI starts it too), unpacking the real ffmpeg build and checking it against its published checksum, and the notification and *Show in folder* calls against a stand-in D-Bus. I have since run the AppImage on one real desktop, Fedora with COSMIC on an AMD integrated GPU: it starts, downloads ffmpeg from inside the program and encodes with VA-API (see the hardware list above for what came out right). *Sleep* and *Shut down* on Linux, other desktops and distributions, and every other GPU are untried. So is dropping a file from a file manager on Wayland: Stiva goes through XWayland for that (see [Troubleshooting](#troubleshooting)), and I have not confirmed it on a real desktop.
 
 More than a hundred automated tests run on Linux, including real ffmpeg encodes that check the command lines produce files with the right streams, size and length.
 
@@ -127,7 +128,7 @@ cargo run                                              # debug build, Windows or
 STIVA_FFDIR=/usr/bin cargo test                        # tests; the folder must hold ffmpeg and ffprobe
 cargo build --release                                  # on Windows (MSVC), as the releases are built
 cargo build --release --target x86_64-pc-windows-gnu   # a Windows exe from Linux (mingw-w64)
-packaging/linux/build-appimage.sh 0.2.0                # on Linux, after cargo build --release: dist/stiva-0.2.0-linux-x86_64.AppImage
+packaging/linux/build-appimage.sh 0.2.1                # on Linux, after cargo build --release: dist/stiva-0.2.1-linux-x86_64.AppImage
 ```
 
 Without ffmpeg, the tests that encode skip themselves. On Linux no extra packages are needed to build: the window, graphics and D-Bus libraries are loaded when the program starts.

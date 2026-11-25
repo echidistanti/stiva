@@ -215,23 +215,19 @@ impl Capabilities {
 
 /// Encodes a few black frames with the encoder, using the options a real encode would use.
 /// The error is the first lines ffmpeg printed, which name the real cause.
-fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool, device: &str) -> Result<(), String> {
-    let rate = if bitrate { Rate::Kbps(1000) } else { Rate::Quality(codec.default_crf()) };
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-v", "error", "-nostdin"]);
-    if codec.is_vaapi() {
-        cmd.args(["-vaapi_device", device]);
-    }
-    cmd.args(["-f", "lavfi", "-i", "color=c=black:s=640x360:r=25:d=0.5", "-frames:v", "8"]);
-    if let Some(upload) = codec.upload_filter(bits) {
-        cmd.args(["-vf", upload]);
-    }
-    cmd.args(codec.args(rate, codec.default_preset(), bits));
-    cmd.args(["-f", "null", "-"]);
+/// The test picture: colour bars, a gradient and things that move, so a broken encoder cannot pass by
+/// producing something flat. 8 frames of it.
+const TEST_PICTURE: &str = "testsrc2=s=1280x720:r=25:d=0.32";
+
+/// Below this the picture is damaged: a sound encode is far above (35 dB and more), garbage is under 10.
+const MIN_PSNR_DB: f64 = 15.0;
+
+/// Runs a command and waits up to 20 seconds. A broken driver can hang; then that encoder is given up on.
+/// Gives the exit status (None when it was killed) and what the command said on stderr.
+fn run_limited(mut cmd: Command) -> Result<(Option<std::process::ExitStatus>, String), String> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     crate::deps::quiet(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    // A broken driver can hang; give it a while and then give up on that encoder.
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -248,11 +244,75 @@ fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool, device
     if let Some(mut e) = child.stderr.take() {
         let _ = e.read_to_string(&mut said);
     }
-    match status {
-        Some(s) if s.success() => Ok(()),
-        Some(_) => Err(said.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join(" | ")),
-        None => Err("no answer within 20 seconds".into()),
+    Ok((status, said))
+}
+
+fn first_lines(said: &str) -> String {
+    said.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join(" | ")
+}
+
+/// A short encode of the test picture. A graphics chip's encode is written to a real MP4 and read back, because
+/// an encoder can finish without any error and still write a picture that is garbage; the others only have to
+/// finish.
+fn test_encode(ffmpeg: &Path, codec: VideoCodec, bits: u8, bitrate: bool, device: &str) -> Result<(), String> {
+    let rate = if bitrate { Rate::Kbps(1000) } else { Rate::Quality(codec.default_crf()) };
+    let check = codec.is_vaapi().then(|| std::env::temp_dir().join(format!("stiva-probe-{}-{}.mp4", std::process::id(), codec.encoder())));
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
+    if codec.is_vaapi() {
+        cmd.args(["-vaapi_device", device]);
     }
+    cmd.args(["-f", "lavfi", "-i", TEST_PICTURE, "-frames:v", "8"]);
+    if let Some(upload) = codec.upload_filter(bits) {
+        cmd.args(["-vf", upload]);
+    }
+    cmd.args(codec.args(rate, codec.default_preset(), bits));
+    match &check {
+        Some(file) => {
+            if let Some(tag) = codec.mp4_tag() {
+                cmd.args(["-tag:v", tag]);
+            }
+            cmd.args(["-f", "mp4"]).arg(file);
+        }
+        None => {
+            cmd.args(["-f", "null", "-"]);
+        }
+    }
+    let result = match run_limited(cmd)? {
+        (Some(s), _) if s.success() => Ok(()),
+        (Some(_), said) => Err(first_lines(&said)),
+        (None, _) => Err("no answer within 20 seconds".into()),
+    };
+    let result = result.and_then(|()| check.as_deref().map_or(Ok(()), |file| picture_is_sound(ffmpeg, file)));
+    if let Some(file) = &check {
+        let _ = std::fs::remove_file(file);
+    }
+    result
+}
+
+/// Reads the encoded test file back and compares it with the test picture, frame by frame.
+fn picture_is_sound(ffmpeg: &Path, file: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-i"]).arg(file);
+    cmd.args(["-f", "lavfi", "-i", TEST_PICTURE, "-lavfi"]);
+    // Frames are paired by their position, so a container that keeps one frame more or less cannot fool it.
+    cmd.arg("[0:v:0]settb=AVTB,setpts=N*1000,format=yuv420p[a];[1:v:0]settb=AVTB,setpts=N*1000,format=yuv420p[b];[a][b]psnr");
+    cmd.args(["-f", "null", "-"]);
+    let (status, said) = run_limited(cmd)?;
+    if status.is_none() {
+        return Err("reading the test picture back took too long".into());
+    }
+    match psnr_of(&said) {
+        Some(db) if db >= MIN_PSNR_DB => Ok(()),
+        Some(db) => Err(format!("it finishes, but the picture is garbage ({db:.1} dB against the test picture)")),
+        None => Err(format!("could not read the test picture back: {}", first_lines(&said))),
+    }
+}
+
+/// The average PSNR in dB that ffmpeg's psnr filter prints at the end ("inf" when the pictures are identical).
+fn psnr_of(said: &str) -> Option<f64> {
+    let line = said.lines().rev().find(|l| l.contains("PSNR") && l.contains("average:"))?;
+    line.split("average:").nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -319,6 +379,46 @@ mod tests {
         assert!(!caps.report().contains("VA-API device"));
         caps.vaapi_device = Some("/dev/dri/renderD129".into());
         assert!(caps.report().contains("VA-API device: /dev/dri/renderD129\n"), "{}", caps.report());
+    }
+
+    #[test]
+    fn the_psnr_is_read_from_the_last_line_ffmpeg_prints() {
+        let said = "[Parsed_psnr_2 @ 0x55] PSNR y:41.20 u:44.00 v:45.10 average:42.35 min:40.10 max:48.00\n";
+        assert_eq!(psnr_of(said), Some(42.35));
+        assert_eq!(psnr_of("PSNR y:inf u:inf v:inf average:inf min:inf max:inf"), Some(f64::INFINITY));
+        assert_eq!(psnr_of("Conversion failed!"), None);
+    }
+
+    /// Needs an ffmpeg with libx264 on the PATH; where there is none the test has nothing to run.
+    fn ffmpeg_with_x264() -> Option<&'static Path> {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).contains("libx264").then_some(Path::new("ffmpeg"))
+    }
+
+    fn write_mp4(ffmpeg: &Path, source: &str, file: &Path) {
+        let ok = Command::new(ffmpeg)
+            .args(["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, "-t", "0.32", "-frames:v", "8"])
+            .args(["-c:v", "libx264", "-qp", "26", "-f", "mp4"])
+            .arg(file)
+            .status()
+            .map(|s| s.success());
+        assert_eq!(ok.ok(), Some(true), "the test file could not be written");
+    }
+
+    #[test]
+    fn an_encode_that_finishes_with_the_wrong_picture_is_refused() {
+        let Some(ffmpeg) = ffmpeg_with_x264() else { return };
+        let dir = std::env::temp_dir();
+        let good = dir.join(format!("stiva-test-good-{}.mp4", std::process::id()));
+        let bad = dir.join(format!("stiva-test-bad-{}.mp4", std::process::id()));
+        write_mp4(ffmpeg, TEST_PICTURE, &good);
+        write_mp4(ffmpeg, "mandelbrot=s=1280x720:r=25", &bad);
+        let sound = picture_is_sound(ffmpeg, &good);
+        let garbage = picture_is_sound(ffmpeg, &bad);
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(sound, Ok(()));
+        assert!(garbage.as_ref().is_err_and(|e| e.contains("garbage")), "{garbage:?}");
     }
 
     #[test]

@@ -284,6 +284,12 @@ impl VideoCodec {
         matches!(self, VideoCodec::X265 | VideoCodec::HevcAmf | VideoCodec::HevcNvenc | VideoCodec::HevcQsv | VideoCodec::HevcVaapi)
     }
 
+    /// The tag an H.265 video needs in MP4 for Apple players and Windows' own player to recognise it. VA-API
+    /// goes without: on a Radeon 780M the same encode came out as garbage with `hvc1` and sound without it.
+    pub fn mp4_tag(self) -> Option<&'static str> {
+        (self.is_hevc() && !self.is_vaapi()).then_some("hvc1")
+    }
+
     /// Lowest and highest value of the quality scale: lower is better and bigger.
     pub fn crf_range(self) -> (u32, u32) {
         use VideoCodec::*;
