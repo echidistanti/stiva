@@ -177,6 +177,12 @@ pub const REMOVE: &str = "Take off the queue";
 pub const RUN_AGAIN: &str = "Run again";
 pub const SKIPPED_EXISTS: &str = "Skipped, the file already exists";
 pub const MORE_WAITING: &str = "more waiting";
+pub const TRACKS_VIDEO: &str = "Video";
+pub const TRACKS_AUDIO_ONLY: &str = "Left out: the format holds audio only.";
+pub const TRACKS_NO_AUDIO: &str = "Left out: the audio is set to No audio.";
+pub const TRACKS_OF: &str = "of";
+pub const TRACKS_KEPT: &str = "kept";
+pub const TRACKS_PART: &str = "Part of the file";
 
 // Presets
 pub const PRESET: &str = "Preset";

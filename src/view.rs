@@ -27,6 +27,8 @@ pub enum Action {
     ShowQueue,
     RemoveItem(u64),
     RetryItem(u64),
+    /// Opens or closes a job on the queue page, to show the tracks it keeps.
+    ToggleItem(u64),
     ClearFinished,
     ApplyPreset(String),
     SavePreset,
@@ -1069,10 +1071,24 @@ impl App {
             return;
         }
         for (id, name, summary, state, out) in rows {
-            ui::card(ui, ui::CARD, Stroke::new(1.0, ui::LINE), |ui| {
-                ui.set_width(ui.available_width());
-                self.queue_row(ui, id, &name, &summary, &state, &out, actions);
+            let open = self.expanded.contains(&id);
+            // The whole card answers a click and opens on the tracks; its buttons sit above it and keep their own clicks.
+            let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("queue_item", id)).sense(egui::Sense::click()), |ui| {
+                // Text that can be selected would take the click for itself.
+                ui.style_mut().interaction.selectable_labels = false;
+                let hot = ui.response().contains_pointer();
+                let line = if hot { ui::MUTED } else { ui::LINE };
+                ui::card(ui, ui::CARD, Stroke::new(1.0, line), |ui| {
+                    ui.set_width(ui.available_width());
+                    self.queue_row(ui, id, &name, &summary, &state, &out, open, hot, actions);
+                    if open && let Some(item) = self.queue.get(id) {
+                        job_tracks(ui, &item.job);
+                    }
+                });
             });
+            if card.response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                actions.push(Action::ToggleItem(id));
+            }
             ui.add_space(8.0);
         }
     }
@@ -1086,6 +1102,8 @@ impl App {
         summary: &str,
         state: &State,
         out: &std::path::Path,
+        open: bool,
+        hot: bool,
         actions: &mut Vec<Action>,
     ) {
         ui.horizontal(|ui| {
@@ -1126,6 +1144,8 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui::chevron(ui, open, hot);
                     clipped(ui, RichText::new(name).size(15.0).strong());
                 });
             });
@@ -1294,7 +1314,18 @@ impl App {
             Action::AddToQueue => {
                 self.add_current(false);
             }
-            Action::Encode => self.encode(),
+            Action::Encode => {
+                // The work goes on in the queue, so that is what the window shows from here.
+                if self.encode() {
+                    self.page = Page::Queue;
+                    self.qtab = QueueTab::Queued;
+                }
+            }
+            Action::ToggleItem(id) => {
+                if !self.expanded.remove(&id) {
+                    self.expanded.insert(id);
+                }
+            }
             Action::Stop => self.stop(),
             Action::Pause => self.pause(),
             Action::Resume => self.resume(),
@@ -1590,6 +1621,111 @@ fn tracks_and_range(ui: &mut egui::Ui, src: &mut Source, container: Container) {
     }
 }
 
+/// One track of the file a job reads, as an opened card lists it.
+#[derive(Debug, PartialEq)]
+struct TrackRow {
+    text: String,
+    /// It goes into the new file.
+    kept: bool,
+}
+
+/// The tracks of one kind, with how many of them go into the new file.
+#[derive(Debug, PartialEq)]
+struct TrackGroup {
+    title: &'static str,
+    rows: Vec<TrackRow>,
+    /// Why none of them is kept, when that is up to the format or the settings and not to the user's choice.
+    note: Option<&'static str>,
+}
+
+impl TrackGroup {
+    fn kept(&self) -> usize {
+        self.rows.iter().filter(|r| r.kept).count()
+    }
+}
+
+/// What a job takes from its file: the picture, the audio tracks and the subtitles, each kept or left out.
+/// It goes by what the encode will really write, so a track that was ticked but cannot go in the format shows as left out.
+fn track_groups(job: &Job) -> Vec<TrackGroup> {
+    let (info, c) = (&job.src, job.settings.container);
+    let mut groups = vec![];
+    if let Some(line) = video_line(info) {
+        let kept = !c.audio_only();
+        groups.push(TrackGroup {
+            title: s::TRACKS_VIDEO,
+            rows: vec![TrackRow { text: line, kept }],
+            note: (!kept).then_some(s::TRACKS_AUDIO_ONLY),
+        });
+    }
+    let audio = job.kept_audio();
+    groups.push(TrackGroup {
+        title: s::AUDIO_TRACKS,
+        rows: info.audio.iter().enumerate().map(|(i, t)| TrackRow { text: audio_label(i, t), kept: audio.contains(&i) }).collect(),
+        note: if info.audio.is_empty() {
+            Some(s::NO_AUDIO)
+        } else if job.settings.audio_codec == AudioCodec::None {
+            Some(s::TRACKS_NO_AUDIO)
+        } else {
+            None
+        },
+    });
+    if !info.subs.is_empty() {
+        let subs = job.kept_subs();
+        let holds_subs = matches!(c, Container::Mkv | Container::Mp4);
+        let rows = info
+            .subs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut text = sub_label(i, t);
+                // Ticked, but MP4 cannot take pictures of text.
+                if holds_subs && job.sub_sel.contains(&i) && !t.fits(c) {
+                    text = format!("{text} ({})", s::SUBTITLE_PICTURES);
+                }
+                TrackRow { text, kept: subs.contains(&i) }
+            })
+            .collect();
+        groups.push(TrackGroup { title: s::SUBTITLE_TRACKS, rows, note: (!holds_subs).then_some(s::SUBTITLE_NONE_HERE) });
+    }
+    groups
+}
+
+/// The opened part of a card on the queue page: the tracks the job keeps, and the part of the file when it is not all of it.
+fn job_tracks(ui: &mut egui::Ui, job: &Job) {
+    // A list to read, not controls: the lines sit closer than the rows of the settings.
+    ui.spacing_mut().interact_size.y = 18.0;
+    ui.spacing_mut().item_spacing.y = 3.0;
+    ui.add_space(8.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, ui::LINE));
+    ui.add_space(6.0);
+    for g in track_groups(job) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(g.title).size(13.0).strong());
+            if g.rows.len() > 1 {
+                ui.label(muted(format!("{} {} {} {}", g.kept(), s::TRACKS_OF, g.rows.len(), s::TRACKS_KEPT)));
+            }
+        });
+        if let Some(n) = g.note {
+            ui.label(RichText::new(n).size(12.5).color(ui::WARN));
+        }
+        for r in &g.rows {
+            ui.horizontal(|ui| {
+                ui::tick(ui, r.kept);
+                let text = RichText::new(&r.text).size(13.0);
+                clipped(ui, if r.kept { text.color(ui::TEXT) } else { text.color(ui::MUTED).strikethrough() });
+            });
+        }
+        ui.add_space(4.0);
+    }
+    if let Some((a, b)) = job.range {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(s::TRACKS_PART).size(13.0).strong());
+            ui.label(RichText::new(format!("{} {} {}", human_duration(a), s::RANGE_TO, human_duration(b))).size(13.0).color(ui::TEXT));
+        });
+    }
+}
+
 fn log_box(ui: &mut egui::Ui, lines: &[String], open: bool, id: &str) {
     if lines.is_empty() {
         return;
@@ -1713,5 +1849,84 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         self.save_if_due(true);
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::EncodeSettings;
+    use crate::probe::{AudioTrack, SourceInfo, SubTrack, VideoInfo};
+
+    fn job() -> Job {
+        let audio = |lang: &str| AudioTrack { codec: "ac3".into(), channels: 6, lang: lang.into(), ..Default::default() };
+        let sub = |codec: &str| SubTrack { codec: codec.into(), lang: "ita".into(), ..Default::default() };
+        let src = SourceInfo {
+            path: PathBuf::from("/in/film.mkv"),
+            duration: Some(600.0),
+            video: Some(VideoInfo { codec: "h264".into(), width: 1920, height: 1080, fps: 24.0, ..Default::default() }),
+            audio: vec![audio("ita"), audio("eng"), audio("jpn")],
+            subs: vec![sub("subrip"), sub("hdmv_pgs_subtitle")],
+            ..Default::default()
+        };
+        Job {
+            src,
+            audio_sel: vec![0, 2],
+            sub_sel: vec![0, 1],
+            settings: EncodeSettings::default(),
+            range: None,
+            out: "/out/film.mp4".into(),
+        }
+    }
+
+    fn kept(g: &TrackGroup) -> Vec<bool> {
+        g.rows.iter().map(|r| r.kept).collect()
+    }
+
+    #[test]
+    fn a_card_lists_every_track_and_marks_the_ones_that_go_in() {
+        let g = track_groups(&job());
+        assert_eq!(g.iter().map(|g| g.title).collect::<Vec<_>>(), [s::TRACKS_VIDEO, s::AUDIO_TRACKS, s::SUBTITLE_TRACKS]);
+        assert_eq!(kept(&g[0]), [true]);
+        assert_eq!(kept(&g[1]), [true, false, true]);
+        assert_eq!(g[1].kept(), 2);
+        assert!(g[1].rows[1].text.contains("eng"));
+        // MP4 takes the text subtitles; the picture ones were ticked but cannot go in, and the card says so.
+        assert_eq!(kept(&g[2]), [true, false]);
+        assert!(g[2].rows[1].text.ends_with(&format!("({})", s::SUBTITLE_PICTURES)));
+        assert!(g.iter().all(|g| g.note.is_none()));
+    }
+
+    #[test]
+    fn what_the_settings_leave_out_shows_as_left_out_with_the_reason() {
+        let mut j = job();
+        j.settings.audio_codec = AudioCodec::None;
+        j.settings.container = Container::WebM;
+        let g = track_groups(&j);
+        assert_eq!(kept(&g[1]), [false, false, false]);
+        assert_eq!(g[1].note, Some(s::TRACKS_NO_AUDIO));
+        assert_eq!(kept(&g[2]), [false, false]);
+        assert_eq!(g[2].note, Some(s::SUBTITLE_NONE_HERE));
+        assert!(!g[2].rows[1].text.contains(s::SUBTITLE_PICTURES), "the MP4 remark is for MP4 only");
+
+        let mut j = job();
+        j.settings.container = Container::Mp3;
+        j.settings.normalize();
+        let g = track_groups(&j);
+        assert_eq!((kept(&g[0]), g[0].note), (vec![false], Some(s::TRACKS_AUDIO_ONLY)));
+        assert_eq!(kept(&g[1]), [true, false, true]);
+        assert_eq!(kept(&g[2]), [false, false]);
+    }
+
+    #[test]
+    fn a_file_without_subtitles_has_no_subtitle_group_and_one_without_audio_says_so() {
+        let mut j = job();
+        j.src.subs.clear();
+        j.src.audio.clear();
+        j.audio_sel.clear();
+        let g = track_groups(&j);
+        assert_eq!(g.len(), 2);
+        assert!(g[1].rows.is_empty());
+        assert_eq!(g[1].note, Some(s::NO_AUDIO));
     }
 }

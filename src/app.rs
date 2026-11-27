@@ -221,6 +221,8 @@ pub struct App {
     pub tab: Tab,
     pub page: Page,
     pub qtab: QueueTab,
+    /// The jobs on the queue page that are opened up to show their tracks.
+    pub expanded: std::collections::HashSet<u64>,
     pub queue: Queue,
     /// The queue is being worked through: when a job ends, the next one starts.
     pub processing: bool,
@@ -295,6 +297,7 @@ impl App {
             },
             page: Page::Editor,
             qtab: QueueTab::Queued,
+            expanded: Default::default(),
             queue: Queue::load(&queue_file()),
             processing: false,
             builtin: presets::builtin(),
@@ -742,12 +745,13 @@ impl App {
     }
 
     /// The Encode button: the file in the window goes to the front of the queue, so it is the first one done.
-    pub fn encode(&mut self) {
+    /// Says whether the queue is being worked through now; when the file could not join it, the window stays as it is.
+    pub fn encode(&mut self) -> bool {
         if self.tools().is_none() || self.run.is_some() {
-            return;
+            return false;
         }
         if matches!(self.src, Src::Ready(_)) && !self.add_current(true) {
-            return;
+            return false;
         }
         if !self.processing {
             self.batch = Batch::default();
@@ -755,6 +759,7 @@ impl App {
         self.power = None;
         self.processing = true;
         self.start_next();
+        true
     }
 
     /// Starts the job at the top of the queue, unless one is running or a question is open.

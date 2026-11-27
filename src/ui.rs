@@ -267,9 +267,44 @@ pub fn close(ui: &mut Ui) -> Response {
             ui.painter().circle_filled(rect.center(), 13.0, FIELD);
         }
         cross_lines(ui.painter(), rect.center(), 4.5, Stroke::new(1.6, if hot { TEXT } else { MUTED }));
-        ui.ctx().set_cursor_icon(if hot { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
+        // Only while hovered: setting the plain arrow otherwise would undo the hand a card under the pointer asked for.
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
     }
     resp
+}
+
+/// The small triangle of something that opens: pointing right when closed, down when open.
+pub fn chevron(ui: &mut Ui, open: bool, hot: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let c = rect.center();
+    let pts = if open {
+        vec![c + vec2(-4.5, -2.5), c + vec2(4.5, -2.5), c + vec2(0.0, 3.0)]
+    } else {
+        vec![c + vec2(-2.5, -4.5), c + vec2(3.0, 0.0), c + vec2(-2.5, 4.5)]
+    };
+    ui.painter().add(Shape::convex_polygon(pts, if hot || open { TEXT } else { MUTED }, Stroke::NONE));
+}
+
+/// A mark that cannot be clicked: a filled box with a tick for what is kept, an empty one for what is left out.
+pub fn tick(ui: &mut Ui, on: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let p = ui.painter();
+    let r = Rect::from_center_size(rect.center(), vec2(13.0, 13.0));
+    if on {
+        p.rect_filled(r, CornerRadius::same(4), ACCENT_FILL);
+        let c = r.center();
+        p.add(Shape::line(vec![c + vec2(-3.5, 0.2), c + vec2(-1.0, 2.8), c + vec2(3.8, -2.6)], Stroke::new(1.7, ON_ACCENT)));
+    } else {
+        p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.2, LINE), StrokeKind::Inside);
+    }
 }
 
 /// Thin progress bar. Without a fraction a short segment slides back and forth.

@@ -43,7 +43,7 @@ impl Job {
     }
 
     /// The audio tracks that go into the file, as positions in `src.audio`.
-    fn kept_audio(&self) -> Vec<usize> {
+    pub fn kept_audio(&self) -> Vec<usize> {
         if self.settings.audio_codec == AudioCodec::None {
             vec![]
         } else {
@@ -52,7 +52,7 @@ impl Job {
     }
 
     /// The subtitle tracks that go into the file: only those the container can hold.
-    fn kept_subs(&self) -> Vec<usize> {
+    pub fn kept_subs(&self) -> Vec<usize> {
         let c = self.settings.container;
         if c.audio_only() || self.src.video.is_none() {
             return vec![];
